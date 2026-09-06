@@ -2,8 +2,10 @@ package top.tangge233.netbridge.nativebridge.internal.ffm;
 
 import top.tangge233.netbridge.nativebridge.*;
 
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import org.jspecify.annotations.Nullable;
 
 public final class FfmNativeServer implements NativeServer {
@@ -11,7 +13,8 @@ public final class FfmNativeServer implements NativeServer {
     private final FfmNativeTransportBackend owner;
     private final long id;
     private final NativeTransportKind transport;
-    private final Set<FfmNativeConnection> acceptedChildren = ConcurrentHashMap.newKeySet();
+    private final Set<FfmNativeConnection> activeChildren = ConcurrentHashMap.newKeySet();
+    private final Queue<FfmNativeConnection> undeliveredChildren = new ConcurrentLinkedQueue<>();
 
     private volatile @Nullable NativeServerListener listener;
     private volatile boolean closed;
@@ -45,7 +48,16 @@ public final class FfmNativeServer implements NativeServer {
     @Override
     public synchronized void setListener(NativeServerListener listener) {
         this.listener = listener;
-        acceptedChildren.forEach(listener::onAccepted);
+        if (listener != null) {
+            while (!undeliveredChildren.isEmpty()) {
+                var child = undeliveredChildren.poll();
+                if (child != null && activeChildren.contains(child)
+                        && child.state() != NativeConnectionState.CLOSED
+                        && child.state() != NativeConnectionState.FAILED) {
+                    listener.onAccepted(child);
+                }
+            }
+        }
     }
 
     @Override
@@ -62,7 +74,8 @@ public final class FfmNativeServer implements NativeServer {
         } catch (RuntimeException e) {
             throw new NativeException("failed to stop native server " + id, e);
         } finally {
-            acceptedChildren.clear();
+            undeliveredChildren.clear();
+            activeChildren.clear();
             owner.unregisterServer(id);
         }
     }
@@ -73,16 +86,24 @@ public final class FfmNativeServer implements NativeServer {
         }
     }
 
-    void handleAccepted(FfmNativeConnection connection) {
-        acceptedChildren.add(connection);
+    synchronized void handleAccepted(FfmNativeConnection connection) {
+        if (closed) {
+            connection.close();
+            return;
+        }
+
+        activeChildren.add(connection);
         var l = listener;
         if (l != null) {
             l.onAccepted(connection);
+        } else {
+            undeliveredChildren.add(connection);
         }
     }
 
     void removeChild(FfmNativeConnection connection) {
-        acceptedChildren.remove(connection);
+        activeChildren.remove(connection);
+        undeliveredChildren.remove(connection);
     }
 
     void handleStateChanged(NativeServerState newState) {

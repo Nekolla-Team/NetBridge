@@ -31,6 +31,9 @@ pub fn map_error(err: BridgeError) -> NbStatus {
         BridgeError::NoSuchConnection => NB_NOT_FOUND,
         BridgeError::ConnectionClosed => NB_CLOSED,
         BridgeError::Timeout => NB_TIMEOUT,
+        BridgeError::Protocol(_) => NB_INTERNAL,
+        BridgeError::Cancelled => NB_CLOSED,
+        BridgeError::Internal(_) => NB_INTERNAL,
         BridgeError::IdOverflow => NB_INTERNAL,
         BridgeError::Other(_) => NB_INTERNAL,
     }

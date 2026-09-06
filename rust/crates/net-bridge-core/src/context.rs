@@ -31,6 +31,8 @@ pub struct NativeContext {
     handle: tokio::runtime::Handle,
     connections: DashMap<u64, ConnHandle>,
     servers: DashMap<u64, ServerHandle>,
+    server_tasks: DashMap<u64, tokio::task::JoinHandle<()>>,
+    conn_tasks: DashMap<u64, tokio::task::JoinHandle<()>>,
     next_id: AtomicU64,
     event_sink: Arc<dyn EventSink>,
 }
@@ -58,6 +60,8 @@ impl NativeContext {
             handle,
             connections: DashMap::new(),
             servers: DashMap::new(),
+            server_tasks: DashMap::new(),
+            conn_tasks: DashMap::new(),
             next_id: AtomicU64::new(1),
             event_sink: event_sink.unwrap_or_else(|| Arc::new(NoopEventSink)),
         }))
@@ -124,13 +128,39 @@ impl NativeContext {
         self.connections.get(&conn).and_then(|h| h.remote_addr)
     }
 
+    /// 尝试原子提交接受连接：如果服务端已停止或不在运行状态，则原子失败。
+    pub(crate) fn try_commit_accept(
+        &self,
+        server_id: u64,
+        conn_id: u64,
+        handle: ConnHandle,
+    ) -> bool {
+        let Some(server) = self.servers.get(&server_id) else {
+            return false;
+        };
+        let _guard = match server.commit_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if !server.is_running() {
+            return false;
+        }
+        self.connections.insert(conn_id, handle);
+        self.event_sink().on_event(
+            crate::event::NB_EVENT_ACCEPTED,
+            server_id,
+            conn_id as i64,
+            0,
+        );
+        true
+    }
+
     /// Java 侧 release：发送 Close 并移除注册表条目（连接 wrapper 是 entry 的 owner）。
     pub fn close_connection(&self, conn: u64) -> bool {
         let Some(handle) = self.connections.get(&conn) else {
             return false;
         };
-        handle.state.store(STATE_CLOSED, Ordering::SeqCst);
-        handle.terminal_sent.store(true, Ordering::SeqCst);
+        let _ = handle.emit_terminal(&*self.event_sink, conn, STATE_CLOSED, 0);
         let to_transport = handle.to_transport.clone();
         let _ = handle.cancel_tx.send(true);
         drop(handle);
@@ -139,30 +169,37 @@ impl NativeContext {
         true
     }
 
-    /// 终态事件（FAILED/CLOSED）恰好一次；entry 保留为 tombstone 直到 Java release。
-    pub(crate) fn emit_terminal(&self, conn_id: u64) {
-        let Some(handle) = self.connections.get(&conn_id) else {
-            return;
-        };
-        if handle.terminal_sent.swap(true, Ordering::SeqCst) {
-            return;
+    /// 发送非终态事件（DATA_AVAILABLE / WRITABLE）。如果终态已标记则静默丢弃。
+    pub(crate) fn emit_non_terminal(&self, conn_id: u64, kind: u32, arg0: i64, arg1: i64) -> bool {
+        if let Some(handle) = self.connections.get(&conn_id) {
+            handle.emit_non_terminal(&*self.event_sink, conn_id, kind, arg0, arg1)
+        } else {
+            false
         }
-        let state = handle.state.load(Ordering::SeqCst);
-        drop(handle);
-        self.event_sink().on_event(
-            crate::event::NB_EVENT_CONNECTION_STATE,
-            conn_id,
-            crate::event::abi_connection_state(state) as i64,
-            0,
-        );
+    }
+
+    /// 终态事件（FAILED/CLOSED）恰好一次；entry 保留为 tombstone 直到 Java release。
+    pub(crate) fn emit_terminal_with_reason(&self, conn_id: u64, reason_code: i64) {
+        if let Some(handle) = self.connections.get(&conn_id) {
+            let state = handle.state.load(Ordering::SeqCst);
+            let _ = handle.emit_terminal(&*self.event_sink, conn_id, state, reason_code);
+        }
+    }
+
+    pub(crate) fn emit_terminal(&self, conn_id: u64) {
+        self.emit_terminal_with_reason(conn_id, 0);
     }
 
     /// 终态落账（tombstone 保留）+ 恰好一次的终态事件。
-    pub(crate) fn fail_connection(&self, conn_id: u64) {
+    pub(crate) fn fail_connection_with_reason(&self, conn_id: u64, reason_code: i64) {
         if let Some(handle) = self.connections.get(&conn_id) {
-            handle.state.store(STATE_FAILED, Ordering::SeqCst);
+            let _ = handle.emit_terminal(&*self.event_sink, conn_id, STATE_FAILED, reason_code);
         }
-        self.emit_terminal(conn_id);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fail_connection(&self, conn_id: u64) {
+        self.fail_connection_with_reason(conn_id, 0);
     }
 
     pub(crate) fn set_conn_remote_addr(&self, conn_id: u64, addr: SocketAddr) {
@@ -182,10 +219,9 @@ impl NativeContext {
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let ctx = self.clone_for_task();
-        let outer = self.handle.clone();
-        let inner_handle = self.handle.clone();
-        outer.spawn(async move {
-            let inner = inner_handle.spawn(fut);
+        let handle = self.handle.clone();
+        let join_handle = self.handle.spawn(async move {
+            let inner = handle.spawn(fut);
             if let Err(e) = inner.await
                 && e.is_panic()
             {
@@ -195,21 +231,22 @@ impl NativeContext {
                     crate::describe_panic(&payload)
                 ));
                 drop(payload);
-                ctx.fail_connection(conn_id);
+                ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_INTERNAL);
             }
+            ctx.conn_tasks.remove(&conn_id);
         });
+        self.conn_tasks.insert(conn_id, join_handle);
     }
 
-    /// 服务端任务 panic → 移除 server entry（Java 持 id，可经 serverStop 识别失败）。
+    /// 服务端任务 panic → 状态置为 FAILED 并发出 SERVER_STATE 事件。
     pub(crate) fn spawn_server_task<F>(self: &Arc<Self>, what: &'static str, server_id: u64, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let ctx = self.clone_for_task();
-        let outer = self.handle.clone();
-        let inner_handle = self.handle.clone();
-        outer.spawn(async move {
-            let inner = inner_handle.spawn(fut);
+        let handle = self.handle.clone();
+        let join_handle = self.handle.spawn(async move {
+            let inner = handle.spawn(fut);
             if let Err(e) = inner.await
                 && e.is_panic()
             {
@@ -219,9 +256,22 @@ impl NativeContext {
                     crate::describe_panic(&payload)
                 ));
                 drop(payload);
+                if let Some(server) = ctx.servers.get(&server_id) {
+                    server
+                        .state
+                        .store(crate::SERVER_STATE_FAILED, Ordering::SeqCst);
+                }
+                ctx.event_sink.on_event(
+                    crate::event::NB_EVENT_SERVER_STATE,
+                    server_id,
+                    crate::event::NB_SERVER_STATE_FAILED as i64,
+                    0,
+                );
                 ctx.servers.remove(&server_id);
             }
+            ctx.server_tasks.remove(&server_id);
         });
+        self.server_tasks.insert(server_id, join_handle);
     }
 
     fn clone_for_task(self: &Arc<Self>) -> Arc<Self> {
@@ -354,11 +404,30 @@ impl NativeContext {
     }
 
     pub fn stop_server(&self, server: u64) -> bool {
-        let Some((_, handle)) = self.servers.remove(&server) else {
+        let Some(handle) = self.servers.get(&server) else {
             return false;
         };
-        handle.is_running.store(false, Ordering::SeqCst);
-        match handle.endpoint {
+        {
+            let _guard = match handle.commit_lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if handle
+                .state
+                .swap(crate::SERVER_STATE_STOPPED, Ordering::SeqCst)
+                == crate::SERVER_STATE_STOPPED
+            {
+                return false;
+            }
+        }
+        let stopped_pair = Arc::clone(&handle.stopped_pair);
+        let endpoint_stop = match &handle.endpoint {
+            TransportEndpoint::Quic(stop_tx) => TransportEndpoint::Quic(stop_tx.clone()),
+            TransportEndpoint::Kcp(stop_tx) => TransportEndpoint::Kcp(stop_tx.clone()),
+        };
+        drop(handle);
+
+        match &endpoint_stop {
             TransportEndpoint::Quic(stop_tx) => {
                 let _ = stop_tx.try_send(());
             }
@@ -366,6 +435,32 @@ impl NativeContext {
                 let _ = stop_tx.try_send(());
             }
         }
+        let (lock, cvar) = &*stopped_pair;
+        let mut guard = match lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(5);
+        while !*guard {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            let (g, _) = match cvar.wait_timeout(guard, timeout - elapsed) {
+                Ok(res) => res,
+                Err(p) => p.into_inner(),
+            };
+            guard = g;
+        }
+        self.event_sink.on_event(
+            crate::event::NB_EVENT_SERVER_STATE,
+            server,
+            crate::event::NB_SERVER_STATE_STOPPED as i64,
+            0,
+        );
+        self.servers.remove(&server);
+        self.server_tasks.remove(&server);
         true
     }
 
@@ -440,21 +535,48 @@ impl NativeContext {
             self.close_connection(c_id);
         }
 
-        // runtime 即将销毁：任务清理回调不会再运行，此处强制回收注册表，
-        // 保证 shutdown 后 registry 归零（无泄漏）。
+        // 取消并排空所有剩余任务
+        for entry in self.conn_tasks.iter() {
+            entry.value().abort();
+        }
+        self.conn_tasks.clear();
+
+        for entry in self.server_tasks.iter() {
+            entry.value().abort();
+        }
+        self.server_tasks.clear();
+
+        // runtime 即将销毁：强制回收注册表，保证 shutdown 后 registry 归零（无泄漏）。
         let remaining: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
         for c_id in remaining {
             self.remove_conn(c_id);
         }
 
         // 关闭 Tokio runtime
-        let mut guard = self.runtime.lock().unwrap();
-        if let Some(rt) = guard.take() {
+        if let Ok(mut guard) = self.runtime.lock()
+            && let Some(rt) = guard.take()
+        {
             rt.shutdown_timeout(timeout);
         }
 
         self.state.store(CONTEXT_STATE_CLOSED, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+impl Drop for NativeContext {
+    fn drop(&mut self) {
+        if let Ok(mut rt_opt) = self.runtime.lock()
+            && let Some(rt) = rt_opt.take()
+        {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::spawn(move || {
+                    drop(rt);
+                });
+            } else {
+                drop(rt);
+            }
+        }
     }
 }
 
@@ -815,5 +937,199 @@ mod tests {
             .connection_remote_addr(client)
             .expect("client remote addr 必须在握手成功后记录");
         assert!(remote.port() > 0);
+    }
+
+    #[test]
+    fn event_ordering_terminal_fences_non_terminal() {
+        let (ctx, sink) = recording_ctx();
+        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
+        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
+        let conn_id = 999;
+        ctx.conns().insert(
+            conn_id,
+            ConnHandle::new(
+                Arc::new(AtomicU32::new(STATE_CONNECTED)),
+                to_java_rx,
+                to_transport_tx,
+                cancel_tx,
+                None,
+                None,
+                false,
+                None,
+            ),
+        );
+
+        // Emit terminal
+        ctx.emit_terminal_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
+
+        // Attempt non-terminal events after terminal: MUST be rejected/suppressed!
+        let data_emitted =
+            ctx.emit_non_terminal(conn_id, crate::event::NB_EVENT_DATA_AVAILABLE, 0, 0);
+        assert!(
+            !data_emitted,
+            "DATA_AVAILABLE after terminal must be suppressed"
+        );
+
+        let writable_emitted =
+            ctx.emit_non_terminal(conn_id, crate::event::NB_EVENT_WRITABLE, 0, 0);
+        assert!(
+            !writable_emitted,
+            "WRITABLE after terminal must be suppressed"
+        );
+
+        // Duplicate terminal must also be a no-op
+        ctx.emit_terminal(conn_id);
+
+        let events = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            events.len(),
+            1,
+            "Only exact-once terminal event must be emitted"
+        );
+        assert_eq!(events[0].0, crate::event::NB_EVENT_CONNECTION_STATE);
+        assert_eq!(events[0].1, conn_id);
+        assert_eq!(events[0].3, crate::event::NB_REASON_PROTOCOL);
+    }
+
+    #[test]
+    fn server_stop_linearization_rejects_late_accept() {
+        let (ctx, sink) = recording_ctx();
+        let (stop_tx, _) = tokio::sync::mpsc::channel(1);
+        let server_id = 100;
+        let conn_count = Arc::new(AtomicUsize::new(1));
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(
+            crate::SERVER_STATE_RUNNING,
+        ));
+        let commit_lock = Arc::new(std::sync::Mutex::new(()));
+        let stopped_pair = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
+
+        ctx.servers_map().insert(
+            server_id,
+            ServerHandle {
+                endpoint: TransportEndpoint::Quic(stop_tx),
+                port: 12345,
+                max_connections: 16,
+                conn_count: Arc::clone(&conn_count),
+                state: Arc::clone(&state),
+                commit_lock: Arc::clone(&commit_lock),
+                stopped_pair,
+            },
+        );
+
+        // Stop the server
+        assert!(ctx.stop_server(server_id));
+
+        // Now an accept attempt comes in after stop linearization:
+        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
+        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ConnHandle::new(
+            Arc::new(AtomicU32::new(STATE_CONNECTED)),
+            to_java_rx,
+            to_transport_tx,
+            cancel_tx,
+            Some(server_id),
+            Some(conn_count),
+            false,
+            None,
+        );
+
+        let accepted = ctx.try_commit_accept(server_id, 200, handle);
+        assert!(!accepted, "Late accept after server stop must be rejected");
+        assert!(
+            !ctx.conns().contains_key(&200),
+            "Rejected connection must not be in registry"
+        );
+
+        let events: Vec<_> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _, _, _)| *k == crate::event::NB_EVENT_ACCEPTED)
+            .cloned()
+            .collect();
+        assert!(
+            events.is_empty(),
+            "No ACCEPTED event may be emitted after stop"
+        );
+    }
+
+    #[test]
+    fn saturated_command_queue_does_not_block_close() {
+        let (ctx, _) = recording_ctx();
+        let (to_transport_tx, _to_transport_rx) = tokio::sync::mpsc::channel(1);
+        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let conn_id = 777;
+
+        // Fill the 1-capacity command channel
+        let _ = to_transport_tx.try_send(Command::Write(Bytes::from_static(b"fill")));
+
+        ctx.conns().insert(
+            conn_id,
+            ConnHandle::new(
+                Arc::new(AtomicU32::new(STATE_CONNECTED)),
+                to_java_rx,
+                to_transport_tx,
+                cancel_tx,
+                None,
+                None,
+                false,
+                None,
+            ),
+        );
+
+        // Closing a connection with a saturated command queue must succeed immediately out-of-band
+        assert!(ctx.close_connection(conn_id));
+        assert!(*cancel_rx.borrow(), "Cancellation signal must be delivered");
+        assert!(
+            !ctx.conns().contains_key(&conn_id),
+            "Registry entry must be removed"
+        );
+    }
+
+    #[test]
+    fn partial_read_accounting_is_exact() {
+        let (ctx, _) = recording_ctx();
+        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
+        let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel(16);
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
+        let conn_id = 888;
+        let handle = ConnHandle::new(
+            Arc::new(AtomicU32::new(STATE_CONNECTED)),
+            to_java_rx,
+            to_transport_tx,
+            cancel_tx,
+            None,
+            None,
+            false,
+            None,
+        );
+        let inbound_bytes = Arc::clone(&handle.inbound_bytes);
+        ctx.conns().insert(conn_id, handle);
+
+        // Put 100 bytes
+        inbound_bytes.store(100, Ordering::SeqCst);
+        let _ = to_java_tx.try_send(Bytes::copy_from_slice(&[42u8; 100]));
+
+        // Read 30 bytes
+        let first = ctx.read_chunk(conn_id, 30).expect("read");
+        assert_eq!(first.len(), 30);
+        assert_eq!(
+            inbound_bytes.load(Ordering::SeqCst),
+            70,
+            "Inbound budget must decrease by exactly 30"
+        );
+
+        // Read remaining 70 bytes
+        let second = ctx.read_chunk(conn_id, 100).expect("read");
+        assert_eq!(second.len(), 70);
+        assert_eq!(
+            inbound_bytes.load(Ordering::SeqCst),
+            0,
+            "Inbound budget must return to 0"
+        );
     }
 }

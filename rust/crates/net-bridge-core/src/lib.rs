@@ -18,7 +18,7 @@ pub use transport::TransportKind;
 use std::any::Any;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -36,6 +36,11 @@ pub const STATE_CONNECTING: u32 = 0;
 pub const STATE_CONNECTED: u32 = 1;
 pub const STATE_CLOSED: u32 = 2;
 pub const STATE_FAILED: u32 = 3;
+
+/// 内部服务端状态常量。
+pub const SERVER_STATE_RUNNING: u8 = 1;
+pub const SERVER_STATE_STOPPED: u8 = 2;
+pub const SERVER_STATE_FAILED: u8 = 3;
 
 /// 默认出站/入站单连接字节预算上限 (4 MiB)
 pub const DEFAULT_MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
@@ -66,6 +71,8 @@ pub struct ConnHandle {
     pub terminal_sent: AtomicBool,
     /// 连接真实对端地址（Java 侧 ban/限速等 IP 管控）。
     pub remote_addr: Option<SocketAddr>,
+    /// 串行化连接事件以保证终态事件之后绝无非终态事件。
+    event_lock: Mutex<()>,
 }
 
 impl ConnHandle {
@@ -94,7 +101,53 @@ impl ConnHandle {
             inbound_bytes: Arc::new(AtomicUsize::new(0)),
             terminal_sent: AtomicBool::new(false),
             remote_addr,
+            event_lock: Mutex::new(()),
         }
+    }
+
+    /// 尝试发送非终态事件（DATA_AVAILABLE / WRITABLE）。如果终态已标记或已发出，则静默丢弃。
+    pub fn emit_non_terminal(
+        &self,
+        sink: &dyn EventSink,
+        conn_id: u64,
+        kind: u32,
+        arg0: i64,
+        arg1: i64,
+    ) -> bool {
+        let _guard = match self.event_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if self.terminal_sent.load(Ordering::SeqCst) {
+            return false;
+        }
+        sink.on_event(kind, conn_id, arg0, arg1);
+        true
+    }
+
+    /// 原子触发终态事件（FAILED/CLOSED）恰好一次，并设立硬性事件屏障（杜绝任何后续事件）。
+    pub fn emit_terminal(
+        &self,
+        sink: &dyn EventSink,
+        conn_id: u64,
+        internal_state: u32,
+        reason_code: i64,
+    ) -> bool {
+        let _guard = match self.event_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if self.terminal_sent.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.state.store(internal_state, Ordering::SeqCst);
+        sink.on_event(
+            crate::event::NB_EVENT_CONNECTION_STATE,
+            conn_id,
+            crate::event::abi_connection_state(internal_state) as i64,
+            reason_code,
+        );
+        true
     }
 }
 
@@ -106,8 +159,18 @@ pub struct ServerHandle {
     pub max_connections: usize,
     /// 本实例活跃连接数（独立于其他 server 实例）。
     pub conn_count: Arc<AtomicUsize>,
-    /// 服务端运行状态：true 表示正在接收连接，stop_server 时设为 false。
-    pub is_running: Arc<AtomicBool>,
+    /// 服务端运行状态：RUNNING(1), STOPPED(2), FAILED(3)。
+    pub state: Arc<AtomicU8>,
+    /// 串行化 accept commit 与 stop 线性化点。
+    pub commit_lock: Arc<Mutex<()>>,
+    /// 停止完成同步通知。
+    pub stopped_pair: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl ServerHandle {
+    pub fn is_running(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == SERVER_STATE_RUNNING
+    }
 }
 
 /// 传输端点：`stop_server` 按此分支关闭。

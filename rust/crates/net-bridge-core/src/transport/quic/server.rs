@@ -47,11 +47,15 @@ pub fn start_server_in_context(
 
     let server_id = ctx.allocate_id()?;
     let conn_count = Arc::new(AtomicUsize::new(0));
-    let is_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(
+        crate::SERVER_STATE_RUNNING,
+    ));
+    let commit_lock = Arc::new(std::sync::Mutex::new(()));
+    let stopped_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<()>(1);
     let accept_endpoint = endpoint.clone();
     let accept_counter = Arc::clone(&conn_count);
-    let accept_is_running = Arc::clone(&is_running);
+    let accept_stopped = Arc::clone(&stopped_pair);
     ctx.servers_map().insert(
         server_id,
         ServerHandle {
@@ -59,35 +63,51 @@ pub fn start_server_in_context(
             port: actual_port,
             max_connections,
             conn_count,
-            is_running,
+            state,
+            commit_lock,
+            stopped_pair,
         },
+    );
+    ctx.event_sink().on_event(
+        crate::event::NB_EVENT_SERVER_STATE,
+        server_id,
+        crate::event::NB_SERVER_STATE_RUNNING as i64,
+        0,
     );
 
     let ctx_clone = Arc::clone(ctx);
     ctx.spawn_server_task("quic accept loop in context", server_id, async move {
+        let mut incoming_set = tokio::task::JoinSet::new();
         loop {
-            let incoming = tokio::select! {
-                _ = stop_rx.recv() => None,
-                acc = accept_endpoint.accept() => acc,
-            };
-            let Some(incoming) = incoming else {
-                break;
-            };
-            if accept_counter.load(Ordering::Relaxed) >= max_connections {
-                drop(incoming);
-                continue;
+            tokio::select! {
+                _ = stop_rx.recv() => break,
+                acc = accept_endpoint.accept() => {
+                    let Some(incoming) = acc else {
+                        break;
+                    };
+                    if accept_counter.load(Ordering::Relaxed) >= max_connections {
+                        drop(incoming);
+                        continue;
+                    }
+                    let conn_counter = Arc::clone(&accept_counter);
+                    let c = Arc::clone(&ctx_clone);
+                    incoming_set.spawn(serve_incoming_in_context(
+                        c,
+                        server_id,
+                        incoming,
+                        conn_counter,
+                        max_connections,
+                    ));
+                }
+                Some(_) = incoming_set.join_next(), if !incoming_set.is_empty() => {}
             }
-            let conn_counter = Arc::clone(&accept_counter);
-            let conn_is_running = Arc::clone(&accept_is_running);
-            let c = Arc::clone(&ctx_clone);
-            c.handle().spawn(serve_incoming_in_context(
-                c.clone(),
-                server_id,
-                incoming,
-                conn_counter,
-                conn_is_running,
-                max_connections,
-            ));
+        }
+        incoming_set.abort_all();
+        while incoming_set.join_next().await.is_some() {}
+        let (lock, cvar) = &*accept_stopped;
+        if let Ok(mut g) = lock.lock() {
+            *g = true;
+            cvar.notify_all();
         }
     });
     Ok(server_id)
@@ -98,7 +118,6 @@ async fn serve_incoming_in_context(
     server_id: u64,
     incoming: quinn::Incoming,
     conn_counter: Arc<AtomicUsize>,
-    is_running: Arc<std::sync::atomic::AtomicBool>,
     max_connections: usize,
 ) {
     let peer = incoming.remote_address();
@@ -129,37 +148,30 @@ async fn serve_incoming_in_context(
         return;
     };
 
-    // Atomic commit check with server lifecycle
-    if !is_running.load(Ordering::SeqCst) || !ctx.servers_map().contains_key(&server_id) {
+    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
+    let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
+
+    let handle = crate::ConnHandle::new(
+        state.clone(),
+        to_java_rx,
+        to_transport_tx.clone(),
+        cancel_tx,
+        Some(server_id),
+        Some(conn_counter.clone()),
+        true,
+        Some(peer),
+    );
+
+    // Linearized commit check with server lifecycle
+    if !ctx.try_commit_accept(server_id, conn_id, handle) {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
         conn.close(0u32.into(), b"server stopped");
         return;
     }
 
-    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
-    let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
-    ctx.conns().insert(
-        conn_id,
-        crate::ConnHandle::new(
-            state.clone(),
-            to_java_rx,
-            to_transport_tx.clone(),
-            cancel_tx,
-            Some(server_id),
-            Some(conn_counter),
-            true,
-            Some(peer),
-        ),
-    );
     ctx.set_conn_remote_addr(conn_id, peer);
-    ctx.event_sink().on_event(
-        crate::event::NB_EVENT_ACCEPTED,
-        server_id,
-        conn_id as i64,
-        0,
-    );
     let accept_ctx = Arc::clone(&ctx);
     let to_transport_tx_runner = to_transport_tx;
     ctx.spawn_connection_task("quic stream accept and drive", conn_id, async move {

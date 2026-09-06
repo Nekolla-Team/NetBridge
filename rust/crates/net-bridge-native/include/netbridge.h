@@ -60,6 +60,21 @@ typedef struct nb_context nb_context_t;
 #define NB_EVENT_ACCEPTED         4
 #define NB_EVENT_SERVER_STATE     5
 
+/* === Server States (arg0 in NB_EVENT_SERVER_STATE) === */
+#define NB_SERVER_STATE_RUNNING 1
+#define NB_SERVER_STATE_STOPPED 2
+#define NB_SERVER_STATE_FAILED  3
+
+/* === Connection Failure Reasons (arg1 in NB_EVENT_CONNECTION_STATE when state is FAILED) === */
+#define NB_REASON_GENERIC    0
+#define NB_REASON_DNS        1
+#define NB_REASON_SETUP      2
+#define NB_REASON_REFUSED    3
+#define NB_REASON_TIMEOUT    4
+#define NB_REASON_PROTOCOL   5
+#define NB_REASON_CANCELLED  6
+#define NB_REASON_INTERNAL   7
+
 /* === Feature Bits === */
 #define NB_FEATURE_QUIC                  (1ULL << 0)
 #define NB_FEATURE_KCP                   (1ULL << 1)

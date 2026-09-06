@@ -49,11 +49,12 @@ FFM cutover（ADR-0009）后，Rust 侧 upcall 回调可以低开销地到达 Ja
 
 ## 增补（最终审计定稿）
 
-- **async panic guard**：任务统一经 `NativeContext::spawn_connection_task /
-  spawn_server_task` spawn，外层 await JoinHandle 捕获 poll 期间 panic（测试以 future 内主动 panic 验证
-  cleanup + 恰好一次终态事件）；散落手写 spawn+cleanup 禁止。
-- **early-event race**：连接 wrapper 注册前到达的事件由 setListener reconcile + tombstone 查询兜底；服务端
-  ACCEPTED 早到由 backend `pendingAccepted` 缓冲并在 startServer / setListener 回放——事件不丢失有确定性测试。
-- **client 编排异步化**：`ConnectionExecutor` 为非阻塞状态机（`DelegatingChannelFuture`
-  换绑 delegate），同步 `syncUninterruptibly` 重试循环删除；typed retryable 之外 直接回退 TCP。架构守卫禁止
-  client 包内 `syncUninterruptibly` 回归。
+- **async panic guard 与任务监督**：任务统一经
+  `NativeContext::spawn_connection_task / spawn_server_task` 托管到 context 级 JoinHandle 集合；panic
+  捕获后触发对应连接/服务端终态清理；QUIC reader 与 KCP reader 均作为受控子任务管理，在连接关闭时显式中止与回收。
+- **early-event race 与收养状态机**：服务端早期 ACCEPTED 事件经 `PendingAcceptedConnection`
+  统一状态机跟踪（包含早到 FAILED/CLOSED 终态检测与资源释放）；`FfmNativeServer` 严格分离 active 活跃所有权与
+  undelivered 待分发队列，确保每个连接对服务端 listener 恰好分发一次。
+- **client 编排与 ChannelFuture 契约**：`DelegatingChannelFuture` 拥有完整的基于 monitor 条件等待与原子状态机的
+  Netty Future 契约，彻底消除轮询 sleep；`ClientRuntime` 统一管理所有在途连接尝试（包含原生与 TCP
+  回退），close 时取消全部在途任务且关闭后立即快速失败。

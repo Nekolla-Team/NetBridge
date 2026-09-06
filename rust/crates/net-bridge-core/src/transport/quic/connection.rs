@@ -21,7 +21,7 @@ pub async fn run_connection_with_sink(
     mut recv: quinn::RecvStream,
     mut to_transport_rx: mpsc::Receiver<Command>,
     to_java_tx: mpsc::Sender<Bytes>,
-    to_transport_tx: mpsc::Sender<Command>,
+    _to_transport_tx: mpsc::Sender<Command>,
     state: Arc<AtomicU32>,
     ctx: Arc<NativeContext>,
 ) {
@@ -42,11 +42,10 @@ pub async fn run_connection_with_sink(
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             )
         });
-    let sink = Arc::clone(ctx.event_sink());
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let reader = {
-        let _to_transport_tx = to_transport_tx.clone();
-        let sink = Arc::clone(&sink);
+        let to_java_tx = to_java_tx.clone();
+        let ctx = Arc::clone(&ctx);
         let inbound_bytes = inbound_bytes.clone();
         let reader_state = state.clone();
         tokio::spawn(async move {
@@ -74,11 +73,8 @@ pub async fn run_connection_with_sink(
                             inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
                             break;
                         }
-                        // Only emit if not in terminal state
-                        let st = reader_state.load(Ordering::SeqCst);
-                        if st != crate::STATE_FAILED && st != crate::STATE_CLOSED {
-                            sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
-                        }
+                        // Linearized emit: suppressed if in terminal state
+                        ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -105,8 +101,7 @@ pub async fn run_connection_with_sink(
             }
             done = reader_done_rx.recv() => {
                 if done == Some(false) && state.load(Ordering::SeqCst) != STATE_CLOSED {
-                    state.store(crate::STATE_FAILED, Ordering::SeqCst);
-                    ctx.emit_terminal(conn_id);
+                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
                 }
                 break;
             }
@@ -115,17 +110,12 @@ pub async fn run_connection_with_sink(
                     let bytes_len = bytes.len();
                     if send.write_all(&bytes).await.is_err() {
                         outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                        state.store(crate::STATE_FAILED, Ordering::SeqCst);
-                        ctx.emit_terminal(conn_id);
+                        ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
                         break;
                     }
                     outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                    let st = state.load(Ordering::SeqCst);
-                    if st != crate::STATE_FAILED
-                        && st != crate::STATE_CLOSED
-                        && write_blocked.swap(false, Ordering::SeqCst)
-                    {
-                        sink.on_event(crate::event::NB_EVENT_WRITABLE, conn_id, 0, 0);
+                    if write_blocked.swap(false, Ordering::SeqCst) {
+                        ctx.emit_non_terminal(conn_id, crate::event::NB_EVENT_WRITABLE, 0, 0);
                     }
                 }
                 Some(Command::Close) => {

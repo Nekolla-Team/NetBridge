@@ -1,5 +1,7 @@
 package top.tangge233.netbridge.client;
 
+import top.tangge233.netbridge.nativebridge.NativeConnectException;
+
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
@@ -35,8 +37,18 @@ public record NativeRetryPolicy(
     }
 
     public boolean isRetryable(@Nullable Throwable cause) {
-        return cause == null ||
-                (cause instanceof IOException || cause instanceof TimeoutException);
+        if (cause == null) {
+            return true;
+        }
+
+        if (cause instanceof NativeConnectException nce) {
+            return switch (nce.reason()) {
+                case DNS, SETUP, CANCELLED -> false;
+                case REFUSED, TIMEOUT, PROTOCOL, INTERNAL, GENERIC -> true;
+            };
+        }
+
+        return (cause instanceof IOException || cause instanceof TimeoutException);
     }
 
 }

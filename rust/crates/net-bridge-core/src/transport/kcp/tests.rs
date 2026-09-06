@@ -205,29 +205,41 @@ fn kcp_sustained_and_idle_phase() {
 
 #[test]
 fn kcp_peer_close_propagates_to_client() {
+    eprintln!("KCP TEST START");
     let (ctx, sink) = test_ctx();
+    eprintln!("KCP CTX READY");
     let server = ctx
         .start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
         .expect("start kcp server");
+    eprintln!("KCP SERVER STARTED: {server}");
     let port = ctx.server_port(server).expect("kcp server port");
+    eprintln!("KCP PORT: {port}");
     let client = ctx
         .connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced)
         .expect("kcp connect");
+    eprintln!("KCP CLIENT CONNECT: {client}");
 
     assert_eq!(
         ctx.write_chunk(client, Bytes::copy_from_slice(b"warm-up"))
             .expect("warm-up write"),
         7
     );
+    eprintln!("KCP WARMUP WRITTEN");
 
+    wait_state(&ctx, client, STATE_CONNECTED);
+    eprintln!("KCP CLIENT STATE CONNECTED");
     let server_conn = wait_accepted(&sink, server);
+    eprintln!("KCP SERVER ACCEPTED: {server_conn}");
+    wait_state(&ctx, server_conn, STATE_CONNECTED);
+    eprintln!("KCP SERVER STATE CONNECTED");
 
-    std::thread::sleep(Duration::from_millis(1));
     assert!(ctx.close_connection(server_conn));
+    eprintln!("KCP SERVER CONN CLOSED");
     wait_disconnected(&ctx, client);
+    eprintln!("KCP CLIENT DISCONNECTED");
 
     ctx.close_connection(client);
-    ctx.stop_server(server);
+    eprintln!("KCP TEST END");
 }
 
 #[test]

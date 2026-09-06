@@ -11,6 +11,7 @@ import net.minecraft.server.network.ServerHandshakePacketListenerImpl;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.channel.NativeChannel;
 import top.tangge233.netbridge.nativebridge.NativeConnection;
+import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;
 
@@ -32,16 +33,39 @@ public final class NativeServerTransport {
             NativeConnection connection,
             long sessionGeneration
     ) {
+        if (!NetBridgeServices.serverRuntime().isSessionValid(sessionGeneration)) {
+            NetBridge.LOGGER.warn(
+                    "Rejecting adoption before server thread: session {} is stale",
+                    sessionGeneration
+            );
+            connection.close();
+            return;
+        }
+
         server.execute(() -> {
+            if (!NetBridgeServices.serverRuntime().isSessionValid(sessionGeneration)) {
+                NetBridge.LOGGER.warn(
+                        "Rejecting adoption on server thread entry: session {} is stale",
+                        sessionGeneration
+                );
+                connection.close();
+                return;
+            }
+
             var channel = new NativeChannel(connection);
             try {
                 channel.setRemoteAddress(connection.remoteAddress());
             } catch (RuntimeException e) {
-                channel.setRemoteAddress(new InetSocketAddress("0.0.0.0", 0));
+                channel.setRemoteAddress(
+                        new InetSocketAddress("0.0.0.0", 0)
+                );
             }
 
             var pipeline = channel.pipeline();
-            pipeline.addLast("timeout", new ReadTimeoutHandler(30));
+            pipeline.addLast(
+                    "timeout",
+                    new ReadTimeoutHandler(30)
+            );
 
             Connection.configureSerialization(
                     pipeline,
@@ -61,8 +85,11 @@ public final class NativeServerTransport {
             );
 
             var serverConnection = server.getConnection();
-            if (serverConnection == null || !server.isRunning()) {
-                channel.close();
+            if (serverConnection == null
+                    || !server.isRunning()
+                    || !NetBridgeServices.serverRuntime().isSessionValid(sessionGeneration)
+            ) {
+                var _ = channel.close();
                 return;
             }
 
@@ -72,7 +99,12 @@ public final class NativeServerTransport {
                 if (f.isSuccess()) {
                     server.execute(() -> {
                         var sc = server.getConnection();
-                        if (sc != null && server.isRunning() && channel.isOpen()) {
+                        if (sc != null
+                                && server.isRunning()
+                                && channel.isOpen()
+                                && NetBridgeServices.serverRuntime()
+                                .isSessionValid(sessionGeneration)
+                        ) {
                             sc.getConnections().add(mcConnection);
                             NetBridge.LOGGER.info(
                                     "Connection {} adopted into server pipeline (channel {}, session {})",
@@ -81,11 +113,11 @@ public final class NativeServerTransport {
                                     sessionGeneration
                             );
                         } else {
-                            channel.close();
+                            var _ = channel.close();
                         }
                     });
                 } else {
-                    channel.close();
+                    var _ = channel.close();
                 }
             });
         });

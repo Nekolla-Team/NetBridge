@@ -70,6 +70,13 @@ public final class ServerRuntime implements AutoCloseable {
         return current != null && current.isRunning();
     }
 
+    public boolean isSessionValid(long sessionGeneration) {
+        var current = manager;
+        return !closed
+                && current != null
+                && current.isSessionValid(sessionGeneration);
+    }
+
     public NetworksAbility announcement() {
         var current = manager;
         return current != null

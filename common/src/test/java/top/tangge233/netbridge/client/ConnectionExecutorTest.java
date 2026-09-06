@@ -7,6 +7,12 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import top.tangge233.netbridge.ability.NetworksAbility;
+import top.tangge233.netbridge.ability.NetworksEntry;
+import top.tangge233.netbridge.ability.TransportProtocol;
+import top.tangge233.netbridge.config.client.ClientConfigStore;
+import top.tangge233.netbridge.config.client.ClientSettings;
+import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.nativebridge.*;
 import top.tangge233.netbridge.nativebridge.fake.FakeNativeTransportBackend;
 import top.tangge233.netbridge.transport.KcpProfile;
@@ -15,6 +21,7 @@ import top.tangge233.netbridge.transport.TransportMode;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -239,6 +246,87 @@ class ConnectionExecutorTest {
             );
             assertNotNull(store.snapshot().transportLine());
         }
+    }
+
+    @Test
+    void connectAfterClientRuntimeCloseFailsFastWithoutNetworkWork() {
+        var settingsService = ClientSettingsService.create(
+                new ClientConfigStore(Path.of("nonexistent.toml"))
+        );
+        var backend = new FakeNativeTransportBackend();
+        var runtime = new ClientRuntime(settingsService, backend);
+        runtime.close();
+
+        var adapter = adapter(group);
+        var future = runtime.connect(
+                new InetSocketAddress(InetAddress.getLoopbackAddress(), 25565),
+                adapter
+        );
+        assertTrue(
+                future.isDone(),
+                "Future must be done immediately after closed runtime connect"
+        );
+        assertFalse(
+                future.isSuccess(),
+                "Future must fail on closed runtime"
+        );
+        assertEquals(
+                0,
+                adapter.openTcpCount.get(),
+                "No TCP socket may be opened after runtime close"
+        );
+    }
+
+    @Test
+    void clientRuntimeCloseCancelsActiveAttemptAndTasks() {
+        var store = new ClientConfigStore(
+                Path.of("nonexistent.toml")
+        );
+        var settingsService = new ClientSettingsService(
+                store,
+                new ClientSettings(
+                        TransportMode.QUIC,
+                        KcpProfile.BALANCE
+                )
+        );
+        var backend = new UnresponsiveTestBackend();
+        var runtime = new ClientRuntime(settingsService, backend);
+        runtime.recordServerCapabilities(
+                new InetSocketAddress(
+                        InetAddress.getLoopbackAddress(),
+                        25565
+                ),
+                NetworksAbility.of(
+                        new NetworksEntry(
+                                true,
+                                "127.0.0.1",
+                                25565,
+                                TransportProtocol.QUIC_V1
+                        )
+                )
+        );
+
+        var adapter = adapter(group);
+        var future = runtime.connect(
+                new InetSocketAddress(InetAddress.getLoopbackAddress(), 25565),
+                adapter
+        );
+        assertFalse(future.isDone());
+
+        runtime.close();
+        assertTrue(
+                future.isDone(),
+                "Active attempt must be completed/cancelled on runtime close"
+        );
+        assertTrue(
+                future.isCancelled(),
+                "Active attempt must be cancelled on runtime close"
+        );
+        assertEquals(
+                0,
+                adapter.openTcpCount.get(),
+                "Cancelled attempt must not fallback to TCP"
+        );
     }
 
     private static final class UnresponsiveTestBackend implements NativeTransportBackend {

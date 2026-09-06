@@ -71,6 +71,18 @@ pub enum BridgeError {
     #[error("operation timed out")]
     Timeout,
 
+    /// 协议/流/smux/fec 数据面建立或传输错误。
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
+    /// 连接建立在完成前被取消。
+    #[error("connection cancelled")]
+    Cancelled,
+
+    /// 内部错误或 panic。
+    #[error("internal error: {0}")]
+    Internal(String),
+
     /// id 分配器即将回绕：context 必须失败，禁止复用 0。
     #[error("object id space exhausted")]
     IdOverflow,
@@ -84,5 +96,19 @@ impl BridgeError {
     /// 日志边界的字符串形态。
     pub fn message(&self) -> String {
         self.to_string()
+    }
+
+    /// 转换为 ABI CONNECTION_STATE FAILED 的原因码。
+    pub fn reason_code(&self) -> i64 {
+        match self {
+            Self::Dns { .. } => 1,
+            Self::Bind { .. } | Self::Setup { .. } => 2,
+            Self::Connect { .. } => 3,
+            Self::Timeout => 4,
+            Self::Protocol(_) => 5,
+            Self::Cancelled | Self::ConnectionClosed | Self::NoSuchConnection => 6,
+            Self::Internal(_) | Self::IdOverflow | Self::RuntimeUnavailable => 7,
+            Self::Other(_) => 0,
+        }
     }
 }

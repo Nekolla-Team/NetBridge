@@ -72,12 +72,28 @@ public final class ConnectionExecutor {
             @Nullable NativeTransportBackend backend,
             ConnectionExecutorAdapter adapter
     ) {
+        var result = new DelegatingChannelFuture(adapter.eventLoopGroup());
+        execute(
+                plan,
+                backend,
+                adapter,
+                result
+        );
+        return result;
+    }
+
+    public void execute(
+            ConnectionPlan plan,
+            @Nullable NativeTransportBackend backend,
+            ConnectionExecutorAdapter adapter,
+            DelegatingChannelFuture result
+    ) {
         var attemptOpt = plan.nativeAttempt();
         if (backend == null || attemptOpt.isEmpty()) {
-            return fallbackToTcp(plan, adapter);
+            fallbackToTcp(plan, adapter, result);
+            return;
         }
 
-        var result = new DelegatingChannelFuture(adapter.eventLoopGroup());
         runAttempt(
                 plan,
                 backend,
@@ -86,7 +102,6 @@ public final class ConnectionExecutor {
                 1,
                 result
         );
-        return result;
     }
 
     private void runAttempt(
@@ -97,6 +112,10 @@ public final class ConnectionExecutor {
             int attemptNumber,
             DelegatingChannelFuture result
     ) {
+        if (result.isAttemptCancelled()) {
+            return;
+        }
+
         stateStore.connecting(attempt.mode());
         ChannelFuture attemptFuture;
         try {
@@ -120,7 +139,8 @@ public final class ConnectionExecutor {
             );
             return;
         }
-        result.setDelegate(attemptFuture, false);
+
+        result.onAttemptStarted(attemptFuture.channel(), attemptFuture);
         attemptFuture.addListener(f -> {
             if (f.isSuccess()) {
                 stateStore.connected(
@@ -134,9 +154,10 @@ public final class ConnectionExecutor {
                                 attempt.endpoint()
                         )
                 );
-                result.setDelegate(attemptFuture, true);
+                result.completeSuccess(attemptFuture.channel());
                 return;
             }
+
             handleAttemptFailure(
                     plan,
                     backend,
@@ -173,6 +194,10 @@ public final class ConnectionExecutor {
         );
         if (failedChannel != null) {
             closeQuietly(failedChannel);
+        }
+
+        if (result.isAttemptCancelled()) {
+            return;
         }
 
         var retryable = retryPolicy.isRetryable(cause);
@@ -222,12 +247,7 @@ public final class ConnectionExecutor {
             );
         }
 
-        if (result.isAttemptCancelled()) {
-            return;
-        }
-
-        var tcpFuture = fallbackToTcp(plan, adapter);
-        result.setDelegate(tcpFuture, true);
+        fallbackToTcp(plan, adapter, result);
     }
 
     private ChannelFuture tryNativeAttempt(
@@ -267,14 +287,26 @@ public final class ConnectionExecutor {
         return future;
     }
 
-    private ChannelFuture fallbackToTcp(
+    private void fallbackToTcp(
             ConnectionPlan plan,
-            ConnectionExecutorAdapter adapter
+            ConnectionExecutorAdapter adapter,
+            DelegatingChannelFuture result
     ) {
+        if (result.isAttemptCancelled()) {
+            return;
+        }
+
         stateStore.fallingBack();
         var tcp = adapter.openTcp(plan.tcpAddress());
-        tcp.addListener(ignored -> stateStore.idle());
-        return tcp;
+        result.onAttemptStarted(tcp.channel(), tcp);
+        tcp.addListener(f -> {
+            stateStore.idle();
+            if (f.isSuccess()) {
+                result.completeSuccess(tcp.channel());
+            } else {
+                result.completeFailure(f.cause(), tcp.channel());
+            }
+        });
     }
 
 }

@@ -159,4 +159,64 @@ class ServerRuntimeTest {
         backend.close();
     }
 
+    @Test
+    void serverGenerationValidationRejectsStaleAdoptionSession(@TempDir Path dir) throws Exception {
+        try (
+                var backend = fakeBackend();
+                var runtime = new ServerRuntime(backend, store(dir))
+        ) {
+            var sessionALatch = new CountDownLatch(1);
+            var sessionAGeneration = new AtomicReference<@Nullable Long>();
+            runtime.setAdopter((_, gen) -> {
+                sessionAGeneration.set(gen);
+                sessionALatch.countDown();
+            });
+
+            // Start session A
+            assertTrue(runtime.start(25565, null));
+            var clientA = backend.connect(
+                    NativeConnectRequest.quic("127.0.0.1", 25565)
+            );
+            assertTrue(sessionALatch.await(3, TimeUnit.SECONDS));
+            var genA = sessionAGeneration.get();
+            assertNotNull(genA);
+            assertTrue(runtime.isSessionValid(genA));
+
+            // Stop session A and start session B
+            runtime.stop();
+            assertFalse(
+                    runtime.isSessionValid(genA),
+                    "Stale generation A must be invalid after stop"
+            );
+
+            var sessionBLatch = new CountDownLatch(1);
+            var sessionBGeneration = new AtomicReference<@Nullable Long>();
+            runtime.setAdopter((_, gen) -> {
+                sessionBGeneration.set(gen);
+                sessionBLatch.countDown();
+            });
+            assertTrue(runtime.start(25566, null));
+            var genB = sessionBGeneration.get();
+            assertFalse(
+                    runtime.isSessionValid(genA),
+                    "Stale generation A must still be invalid when session B is running"
+            );
+
+            var clientB = backend.connect(
+                    NativeConnectRequest.quic("127.0.0.1", 25566)
+            );
+            assertTrue(sessionBLatch.await(3, TimeUnit.SECONDS));
+            genB = sessionBGeneration.get();
+            assertNotNull(genB);
+            assertNotEquals(genA, genB);
+            assertTrue(
+                    runtime.isSessionValid(genB),
+                    "Session B generation must be valid"
+            );
+
+            clientA.close();
+            clientB.close();
+        }
+    }
+
 }

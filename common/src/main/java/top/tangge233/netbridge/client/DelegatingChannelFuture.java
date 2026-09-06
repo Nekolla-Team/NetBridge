@@ -7,29 +7,29 @@ import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import top.tangge233.netbridge.NetBridge;
 
+import java.net.ConnectException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import org.jspecify.annotations.Nullable;
 
 final class DelegatingChannelFuture implements ChannelFuture {
 
-    private final AtomicReference<@Nullable ChannelFuture> delegate = new AtomicReference<>();
-    private final AtomicBoolean terminal = new AtomicBoolean(false);
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final Object lock = new Object();
     private final List<GenericFutureListener<? extends Future<? super Void>>> listeners = new ArrayList<>();
     private final List<ScheduledFuture<?>> scheduledTasks = new ArrayList<>();
+    private volatile State state = State.IN_PROGRESS;
+    private volatile @Nullable Channel currentChannel;
+    private volatile @Nullable ChannelFuture currentDelegate;
+    private volatile @Nullable Throwable cause;
 
     DelegatingChannelFuture(EventLoopGroup _executorGroup) {
     }
 
     void registerScheduledTask(ScheduledFuture<?> task) {
         synchronized (lock) {
-            if (cancelled.get() || terminal.get()) {
+            if (state != State.IN_PROGRESS) {
                 task.cancel(false);
                 return;
             }
@@ -38,23 +38,91 @@ final class DelegatingChannelFuture implements ChannelFuture {
     }
 
     void setDelegate(ChannelFuture future, boolean isTerminal) {
-        if (cancelled.get()) {
-            future.cancel(true);
-            return;
+        if (isTerminal) {
+            if (future.isDone()) {
+                if (future.isSuccess()) {
+                    completeSuccess(future.channel());
+                } else {
+                    completeFailure(future.cause(), future.channel());
+                }
+            } else {
+                future.addListener(f -> {
+                    if (f.isSuccess()) {
+                        completeSuccess(future.channel());
+                    } else {
+                        completeFailure(f.cause(), future.channel());
+                    }
+                });
+            }
+        } else {
+            onAttemptStarted(future.channel(), future);
         }
-        delegate.set(future);
-        if (isTerminal && terminal.compareAndSet(false, true)) {
-            future.addListener(ignored -> fireListeners());
+    }
+
+    void completeSuccess(Channel channel) {
+        List<GenericFutureListener<? extends Future<? super Void>>> snapshot;
+        synchronized (lock) {
+            if (state != State.IN_PROGRESS) {
+                return;
+            }
+
+            this.currentChannel = channel;
+            this.state = State.SUCCESS;
+            lock.notifyAll();
+            snapshot = new ArrayList<>(listeners);
+            listeners.clear();
+        }
+        fireListeners(snapshot);
+    }
+
+    void completeFailure(
+            @Nullable Throwable failureCause,
+            @Nullable Channel channel
+    ) {
+        List<GenericFutureListener<? extends Future<? super Void>>> snapshot;
+        synchronized (lock) {
+            if (state != State.IN_PROGRESS) {
+                return;
+            }
+
+            if (channel != null) {
+                this.currentChannel = channel;
+            }
+            this.cause = failureCause != null
+                    ? failureCause
+                    : new ConnectException("connection failed");
+            this.state = State.FAILED;
+            lock.notifyAll();
+            snapshot = new ArrayList<>(listeners);
+            listeners.clear();
+        }
+        fireListeners(snapshot);
+    }
+
+    void onAttemptStarted(
+            Channel channel,
+            @Nullable ChannelFuture delegateFuture
+    ) {
+        synchronized (lock) {
+            this.currentChannel = channel;
+            this.currentDelegate = delegateFuture;
+            if (state == State.CANCELLED) {
+                try {
+                    var _ = channel.close();
+                } catch (Throwable _) {
+                    // ignore
+                }
+                if (delegateFuture != null) {
+                    delegateFuture.cancel(true);
+                }
+            }
         }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private void fireListeners() {
-        List<GenericFutureListener<? extends Future<? super Void>>> snapshot;
-        synchronized (lock) {
-            snapshot = new ArrayList<>(listeners);
-            listeners.clear();
-        }
+    private void fireListeners(
+            List<GenericFutureListener<? extends Future<? super Void>>> snapshot
+    ) {
         for (var listener : snapshot) {
             try {
                 var raw = (GenericFutureListener) listener;
@@ -71,26 +139,20 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public Channel channel() {
-        var cur = current();
+        var cur = currentChannel;
         if (cur == null) {
             throw new IllegalStateException("Channel not yet initialized on delegating future");
         }
-
-        return cur.channel();
-    }
-
-    private @Nullable ChannelFuture current() {
-        return delegate.get();
+        return cur;
     }
 
     @Override
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public ChannelFuture addListener(
             GenericFutureListener<? extends Future<? super Void>> listener
     ) {
         var shouldInvokeImmediately = false;
         synchronized (lock) {
-            if (terminal.get()) {
+            if (state != State.IN_PROGRESS) {
                 shouldInvokeImmediately = true;
             } else {
                 listeners.add(listener);
@@ -98,16 +160,7 @@ final class DelegatingChannelFuture implements ChannelFuture {
         }
 
         if (shouldInvokeImmediately) {
-            try {
-                var raw = (GenericFutureListener) listener;
-                raw.operationComplete(this);
-            } catch (Exception e) {
-                NetBridge.LOGGER.warn(
-                        "DelegatingChannelFuture listener failed: {}",
-                        e.getMessage(),
-                        e
-                );
-            }
+            fireListener(listener);
         }
         return this;
     }
@@ -119,6 +172,20 @@ final class DelegatingChannelFuture implements ChannelFuture {
     ) {
         Arrays.stream(listeners).forEachOrdered(this::addListener);
         return this;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void fireListener(GenericFutureListener<? extends Future<? super Void>> listener) {
+        try {
+            var raw = (GenericFutureListener) listener;
+            raw.operationComplete(this);
+        } catch (Exception e) {
+            NetBridge.LOGGER.warn(
+                    "DelegatingChannelFuture listener failed: {}",
+                    e.getMessage(),
+                    e
+            );
+        }
     }
 
     @Override
@@ -143,64 +210,46 @@ final class DelegatingChannelFuture implements ChannelFuture {
     @Override
     public ChannelFuture sync() throws InterruptedException {
         await();
-
-        if (isCancelled()) {
-            throw new CancellationException();
-        }
-
-        if (!isSuccess()) {
-            var cause = cause();
-            throw cause == null
-                    ? new IllegalStateException("delegating future failed")
-                    : new IllegalStateException(cause);
-        }
-
+        rethrowIfFailed();
         return this;
     }
 
     @Override
     public ChannelFuture syncUninterruptibly() {
         awaitUninterruptibly();
-        if (isCancelled()) {
-            throw new CancellationException();
-        }
-
-        if (!isSuccess()) {
-            var cause = cause();
-            throw cause == null
-                    ? new IllegalStateException("delegating future failed")
-                    : new IllegalStateException(cause);
-        }
-
+        rethrowIfFailed();
         return this;
     }
 
     @Override
     public ChannelFuture await() throws InterruptedException {
-        while (!isDone()) {
-            var cur = current();
-            if (cur != null) {
-                cur.await(20, TimeUnit.MILLISECONDS);
-            } else {
-                Thread.sleep(10);
+        if (Thread.interrupted()) {
+            throw new InterruptedException();
+        }
+        synchronized (lock) {
+            while (state == State.IN_PROGRESS) {
+                lock.wait();
             }
         }
-
         return this;
     }
 
     @Override
     public ChannelFuture awaitUninterruptibly() {
-        while (!isDone()) {
-            var cur = current();
-            if (cur != null) {
-                cur.awaitUninterruptibly(20, TimeUnit.MILLISECONDS);
-            } else {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException _) {
-                    // ignore
+        var interrupted = false;
+        try {
+            synchronized (lock) {
+                while (state == State.IN_PROGRESS) {
+                    try {
+                        lock.wait();
+                    } catch (InterruptedException _) {
+                        interrupted = true;
+                    }
                 }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
             }
         }
         return this;
@@ -211,38 +260,54 @@ final class DelegatingChannelFuture implements ChannelFuture {
         return false;
     }
 
+    private void rethrowIfFailed() {
+        if (state == State.CANCELLED) {
+            throw new CancellationException();
+        }
+
+        if (state == State.FAILED) {
+            var c = cause;
+            if (c instanceof RuntimeException re) {
+                throw re;
+            }
+            if (c instanceof Error er) {
+                throw er;
+            }
+            throw new IllegalStateException(c);
+        }
+    }
+
+    public boolean isAttemptCancelled() {
+        return state == State.CANCELLED;
+    }
+
+    private enum State {
+
+        IN_PROGRESS,
+        SUCCESS,
+        FAILED,
+        CANCELLED
+
+    }
+
     @Override
     public boolean isCancelled() {
-        var cur = current();
-        return cancelled.get()
-                || (terminal.get() && cur != null && cur.isCancelled());
+        return state == State.CANCELLED;
     }
 
     @Override
     public boolean isSuccess() {
-        var cur = current();
-        return !cancelled.get()
-                && terminal.get()
-                && cur != null
-                && cur.isSuccess();
+        return state == State.SUCCESS;
     }
 
     @Override
     public boolean isCancellable() {
-        var cur = current();
-        return !terminal.get()
-                && (cur == null || cur.isCancellable());
+        return state == State.IN_PROGRESS;
     }
 
     @Override
     public @Nullable Throwable cause() {
-        if (cancelled.get()) {
-            return new CancellationException();
-        }
-        var cur = current();
-        return terminal.get() && cur != null && cur.isDone()
-                ? cur.cause()
-                : null;
+        return cause;
     }
 
     @Override
@@ -250,21 +315,25 @@ final class DelegatingChannelFuture implements ChannelFuture {
             long timeout,
             TimeUnit unit
     ) throws InterruptedException {
-        var deadline = System.nanoTime() + unit.toNanos(timeout);
-        while (!isDone()) {
-            if (System.nanoTime() > deadline) {
-                return isDone();
-            }
-
-            var cur = current();
-            if (cur != null) {
-                cur.await(20, TimeUnit.MILLISECONDS);
-            } else {
-                Thread.sleep(10);
-            }
+        if (Thread.interrupted()) {
+            throw new InterruptedException();
         }
 
-        return true;
+        var nanos = unit.toNanos(timeout);
+        var deadline = System.nanoTime() + nanos;
+        synchronized (lock) {
+            while (state == State.IN_PROGRESS) {
+                if (nanos <= 0) {
+                    return false;
+                }
+
+                var millis = TimeUnit.NANOSECONDS.toMillis(nanos);
+                var remainderNanos = (int) (nanos - TimeUnit.MILLISECONDS.toNanos(millis));
+                lock.wait(millis, remainderNanos);
+                nanos = deadline - System.nanoTime();
+            }
+            return true;
+        }
     }
 
     @Override
@@ -274,25 +343,31 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public boolean awaitUninterruptibly(long timeout, TimeUnit unit) {
-        var deadline = System.nanoTime() + unit.toNanos(timeout);
-        while (!isDone()) {
-            if (System.nanoTime() > deadline) {
-                return isDone();
-            }
-
-            var cur = current();
-            if (cur != null) {
-                cur.awaitUninterruptibly(20, TimeUnit.MILLISECONDS);
-            } else {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException _) {
-                    // uninterruptible loop
+        var nanos = unit.toNanos(timeout);
+        var deadline = System.nanoTime() + nanos;
+        var interrupted = false;
+        try {
+            synchronized (lock) {
+                while (state == State.IN_PROGRESS) {
+                    if (nanos <= 0) {
+                        return false;
+                    }
+                    var millis = TimeUnit.NANOSECONDS.toMillis(nanos);
+                    var remainderNanos = (int) (nanos - TimeUnit.MILLISECONDS.toNanos(millis));
+                    try {
+                        lock.wait(millis, remainderNanos);
+                    } catch (InterruptedException _) {
+                        interrupted = true;
+                    }
+                    nanos = deadline - System.nanoTime();
                 }
+                return true;
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
             }
         }
-
-        return true;
     }
 
     @Override
@@ -310,35 +385,46 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
-        if (terminal.get()) {
-            return false;
+        List<GenericFutureListener<? extends Future<? super Void>>> snapshot;
+        Channel toClose;
+        ChannelFuture delegateToCancel;
+        List<ScheduledFuture<?>> tasksToCancel;
+
+        synchronized (lock) {
+            if (state != State.IN_PROGRESS) {
+                return false;
+            }
+            state = State.CANCELLED;
+            cause = new CancellationException();
+            toClose = currentChannel;
+            delegateToCancel = currentDelegate;
+            tasksToCancel = new ArrayList<>(scheduledTasks);
+            scheduledTasks.clear();
+            lock.notifyAll();
+            snapshot = new ArrayList<>(listeners);
+            listeners.clear();
         }
 
-        if (cancelled.compareAndSet(false, true)) {
-            synchronized (lock) {
-                scheduledTasks.forEach(task ->
-                        task.cancel(mayInterruptIfRunning)
-                );
-                scheduledTasks.clear();
+        if (toClose != null) {
+            try {
+                var _ = toClose.close();
+            } catch (Throwable _) {
+                // ignore
             }
-            var cur = current();
-            if (cur != null) {
-                cur.cancel(mayInterruptIfRunning);
-            }
-            if (terminal.compareAndSet(false, true)) {
-                fireListeners();
-            }
-            return true;
         }
-
-        return false;
+        if (delegateToCancel != null) {
+            delegateToCancel.cancel(mayInterruptIfRunning);
+        }
+        tasksToCancel.forEach(task ->
+                task.cancel(mayInterruptIfRunning)
+        );
+        fireListeners(snapshot);
+        return true;
     }
 
     @Override
     public boolean isDone() {
-        var cur = current();
-        return cancelled.get()
-                || (terminal.get() && cur != null && cur.isDone());
+        return state != State.IN_PROGRESS;
     }
 
     @Override
@@ -368,10 +454,6 @@ final class DelegatingChannelFuture implements ChannelFuture {
             throw new ExecutionException(cause());
         }
         return null;
-    }
-
-    public boolean isAttemptCancelled() {
-        return cancelled.get();
     }
 
 }

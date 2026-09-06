@@ -16,6 +16,7 @@ public final class FfmNativeConnection implements NativeConnection {
     private final NativeTransportKind transport;
 
     private volatile NativeConnectionState state;
+    private volatile NativeFailureReason failureReason = NativeFailureReason.GENERIC;
     private volatile @Nullable NativeConnectionListener listener;
     private volatile boolean closed;
 
@@ -179,7 +180,13 @@ public final class FfmNativeConnection implements NativeConnection {
             }
 
             var bytes = new byte[n];
-            MemorySegment.copy(segment, 0, MemorySegment.ofArray(bytes), 0, n);
+            MemorySegment.copy(
+                    segment,
+                    0,
+                    MemorySegment.ofArray(bytes),
+                    0,
+                    n
+            );
             target.put(bytes, 0, n);
             return NativeIoResult.progressed(n);
         }
@@ -190,7 +197,7 @@ public final class FfmNativeConnection implements NativeConnection {
         this.listener = listener;
         var st = state();
         if (st != NativeConnectionState.CONNECTING) {
-            listener.onStateChanged(st);
+            listener.onStateChanged(st, failureReason);
         }
     }
 
@@ -220,7 +227,7 @@ public final class FfmNativeConnection implements NativeConnection {
         releaseServerOwnership();
         var l = listener;
         if (l != null && prev != NativeConnectionState.CLOSED) {
-            l.onStateChanged(NativeConnectionState.CLOSED);
+            l.onStateChanged(NativeConnectionState.CLOSED, failureReason);
         }
     }
 
@@ -236,7 +243,19 @@ public final class FfmNativeConnection implements NativeConnection {
         }
     }
 
+    public NativeFailureReason failureReason() {
+        return failureReason;
+    }
+
     void handleStateChanged(NativeConnectionState newState) {
+        handleStateChanged(newState, NativeFailureReason.GENERIC);
+    }
+
+    void handleStateChanged(
+            NativeConnectionState newState,
+            NativeFailureReason reason
+    ) {
+        this.failureReason = reason;
         var prev = state;
         if (prev == newState) {
             return;
@@ -245,10 +264,12 @@ public final class FfmNativeConnection implements NativeConnection {
         state = newState;
         var l = listener;
         if (l != null) {
-            l.onStateChanged(newState);
+            l.onStateChanged(newState, reason);
         }
 
-        if (newState == NativeConnectionState.CLOSED || newState == NativeConnectionState.FAILED) {
+        if (newState == NativeConnectionState.CLOSED
+                || newState == NativeConnectionState.FAILED
+        ) {
             owner.unregisterConnection(id);
             releaseServerOwnership();
         }

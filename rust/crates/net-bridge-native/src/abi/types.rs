@@ -27,6 +27,19 @@ pub const NB_EVENT_WRITABLE: u32 = 3;
 pub const NB_EVENT_ACCEPTED: u32 = 4;
 pub const NB_EVENT_SERVER_STATE: u32 = 5;
 
+pub const NB_SERVER_STATE_RUNNING: u32 = 1;
+pub const NB_SERVER_STATE_STOPPED: u32 = 2;
+pub const NB_SERVER_STATE_FAILED: u32 = 3;
+
+pub const NB_REASON_GENERIC: i64 = 0;
+pub const NB_REASON_DNS: i64 = 1;
+pub const NB_REASON_SETUP: i64 = 2;
+pub const NB_REASON_REFUSED: i64 = 3;
+pub const NB_REASON_TIMEOUT: i64 = 4;
+pub const NB_REASON_PROTOCOL: i64 = 5;
+pub const NB_REASON_CANCELLED: i64 = 6;
+pub const NB_REASON_INTERNAL: i64 = 7;
+
 pub struct NbContext(pub Arc<NativeContext>);
 
 #[repr(C)]

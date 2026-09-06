@@ -5,7 +5,6 @@ import io.netty.channel.*;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
-import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -34,6 +33,8 @@ public class NativeChannel extends AbstractChannel {
     private final AtomicBoolean backpressured = new AtomicBoolean();
     private final AtomicReference<NativeConnectionState> nativeState =
             new AtomicReference<>(NativeConnectionState.CONNECTING);
+    private final AtomicReference<NativeFailureReason> failureReason =
+            new AtomicReference<>(NativeFailureReason.GENERIC);
     private volatile boolean connected;
     private volatile boolean readRequested;
     private volatile @Nullable InetSocketAddress remoteAddress;
@@ -46,7 +47,13 @@ public class NativeChannel extends AbstractChannel {
         connection.setListener(new NativeConnectionListener() {
             @Override
             public void onStateChanged(NativeConnectionState state) {
+                onStateChanged(state, NativeFailureReason.GENERIC);
+            }
+
+            @Override
+            public void onStateChanged(NativeConnectionState state, NativeFailureReason reason) {
                 nativeState.set(state);
+                failureReason.set(reason);
                 marshal(NativeChannel.this::applyNativeState);
             }
 
@@ -264,11 +271,14 @@ public class NativeChannel extends AbstractChannel {
             }
             case FAILED -> {
                 if (!connected) {
-                    failConnect(new ConnectException(
-                            "handshake failed (conn %d, see net-bridge-native log)"
-                                    .formatted(connection.id())
-                    ));
-                    pipeline().fireExceptionCaught(new IOException("connection failed"));
+                    var reason = failureReason.get();
+                    var msg = "handshake failed: %s (conn %d)".formatted(
+                            reason.description(),
+                            connection.id()
+                    );
+                    var exc = new NativeConnectException(reason, msg);
+                    failConnect(exc);
+                    pipeline().fireExceptionCaught(exc);
                     unsafe().close(voidPromise());
                 } else {
                     unsafe().close(voidPromise());

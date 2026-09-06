@@ -14,7 +14,7 @@ use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{Command, ConnHandle, STATE_CONNECTING, STATE_FAILED};
+use crate::{Command, ConnHandle, STATE_CONNECTING};
 
 /// 经 NativeContext 发起 KCP 客户端连接。
 pub fn connect_in_context(
@@ -206,10 +206,10 @@ async fn establish_kcp(
 fn fail(
     ctx: &crate::context::NativeContext,
     conn_id: u64,
-    state: &Arc<AtomicU32>,
+    _state: &Arc<AtomicU32>,
     err: BridgeError,
 ) {
-    state.store(STATE_FAILED, Ordering::SeqCst);
-    ctx.emit_terminal(conn_id);
+    let reason = err.reason_code();
     report_error(err.message());
+    ctx.fail_connection_with_reason(conn_id, reason);
 }

@@ -16,6 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.jspecify.annotations.NonNull;
 
@@ -94,7 +95,6 @@ class FfmLifecycleHardeningTest {
             var server = backend.startServer(
                     NativeServerRequest.quic(0, 32)
             );
-            var serverRef = new AtomicReference<>(server);
             server.setListener(new NativeServerListener() {
                 @Override
                 public void onAccepted(@NonNull NativeConnection connection) {
@@ -122,7 +122,6 @@ class FfmLifecycleHardeningTest {
             }
 
             assertDoesNotThrow(server::close);
-            serverRef.get().close();
         }
     }
 
@@ -240,6 +239,7 @@ class FfmLifecycleHardeningTest {
                                     client.state();
                                 }
                             } catch (NativeException _) {
+                                // expected during concurrent backend closure
                             } catch (Throwable unexpected) {
                                 errors.add(unexpected);
                                 return;
@@ -441,6 +441,80 @@ class FfmLifecycleHardeningTest {
             var api = FfmApiV1.fromAddress(fakeTable, arena);
             assertEquals(0L, api.featureBits());
         }
+    }
+
+    @Test
+    void listenerReplacementDoesNotReplayActiveChildren() throws Exception {
+        try (
+                var backend = FfmNativeTransportBackend.load(
+                        nativeLibPath,
+                        2
+                )
+        ) {
+            var server = backend.startServer(
+                    NativeServerRequest.quic(0, 8)
+            );
+            var port = server.localPort();
+
+            var firstDelivered = new AtomicInteger(0);
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(@NonNull NativeConnection connection) {
+                    firstDelivered.incrementAndGet();
+                }
+            });
+
+            var client = backend.connect(
+                    NativeConnectRequest.quic("127.0.0.1", port)
+            );
+            awaitState(client, NativeConnectionState.CONNECTED);
+
+            var deadline = System.currentTimeMillis() + 5000;
+            while (firstDelivered.get() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
+            }
+            assertEquals(
+                    1,
+                    firstDelivered.get(),
+                    "First listener should receive accepted child once"
+            );
+
+            // Replace listener on active server with already delivered child
+            var secondDelivered = new AtomicInteger(0);
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(@NonNull NativeConnection connection) {
+                    secondDelivered.incrementAndGet();
+                }
+            });
+
+            Thread.sleep(50);
+            assertEquals(
+                    0,
+                    secondDelivered.get(),
+                    "Replacing server listener must NOT replay already delivered active children"
+            );
+
+            client.close();
+            server.close();
+        }
+    }
+
+    @Test
+    void concurrentBackendCloseIsSafe() throws Exception {
+        var backend = FfmNativeTransportBackend.load(
+                nativeLibPath,
+                2
+        );
+        var t1 = new Thread(backend::close);
+        var t2 = new Thread(backend::close);
+        t1.start();
+        t2.start();
+        t1.join(5000);
+        t2.join(5000);
+        assertFalse(t1.isAlive());
+        assertFalse(t2.isAlive());
+        assertFalse(backend.availability().available());
     }
 
 }

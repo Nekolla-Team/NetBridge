@@ -29,8 +29,9 @@ ADR-0002 规定握手失败判定为 Java 侧 10s/20s 超时。调查三个依�
 - kcp-rs 内建握手：客户端 `KcpStream::connect` 发 SYN（含随机会话 id），等待服务端确认后 返回——
   `connect_timeout`（原生默认 15s，本栈设为 8s）内无应答即 `TimedOut`，native 层可 判定失败，不再依赖首帧猜测。
 - `session_expire`（默认 90s）仍为服务端闲置会话回收，与建连无关。
-- 因此 KCP 的 CONNECTED 语义修正为「SYN 握手完成」（对端确认可达），不再是首个数据帧。 会话期存活由 smux
-  keep-alive（30s 无数据即会话关闭）兜底。
+- 历史阶段曾将 KCP CONNECTED 暂定为「SYN 握手完成」；但在完整数据面中，会话必须完成 FEC 与 smux stream
+  就绪才具备数据传输能力。因此自 Round 4 起，最终统一为「KCP 传输握手 + FEC + smux 会话建立并打开 MC
+  数据流就绪」才是 STATE_CONNECTED 与 ACCEPTED 的生效时刻。
 
 结论：KCP 握手超时可由 native 层自行终结（8s < Java watchdog 10s），watchdog 退化为兜底。
 
@@ -38,9 +39,8 @@ ADR-0002 规定握手失败判定为 Java 侧 10s/20s 超时。调查三个依�
 
 1. **统一由 Java `HandshakeWatchdog` 承担握手超时**（首次 10s、后续 20s，竞速 connect promise）。 KCP 侧
    native `connect_timeout`(8s) 先失败上报，watchdog 主要兜底 QUIC 黑洞。
-2. **KCP 存活判定修正**：STATE_CONNECTED = kcp-rs SYN 握手完成（connect 返回即双向可达）。 **KCP 客户端出站不受
-   CONNECTED 门控**（native 写路径与 Java channel 均放行连接期写入， 命令在握手完成前入 channel
-   排队）——避免早期会话建立前丢写。
+2. **KCP 存活判定**：STATE_CONNECTED 统一为 KCP SYN + FEC + smux stream 数据面完全就绪（客户端与服务端均在数据流打开后标记
+   CONNECTED / ACCEPTED，不提前暴露半建状态）。
 3. **QUIC 维持现状**：明文握手双向交换 transport params，CONNECTED 即真实可达证明； watchdog
    超时后关闭连接句柄即可。
 4. 两栈其余参数保持默认：`max_idle_timeout`(30s) 管会话期存活，`ReadTimeoutHandler(30)` 管

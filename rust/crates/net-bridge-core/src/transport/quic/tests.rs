@@ -247,9 +247,7 @@ fn quic_peer_close_propagates_to_client() {
 
     assert!(ctx.close_connection(server_conn));
     wait_disconnected(&ctx, client);
-
-    ctx.close_connection(client);
-    ctx.stop_server(server);
+    wait_terminal(&ctx, client);
 }
 
 #[tokio::test]

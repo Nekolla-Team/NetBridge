@@ -279,8 +279,19 @@ public final class ServerTransportManager {
                 : NetworksAbility.empty();
     }
 
+    public long sessionGeneration() {
+        return sessionGeneration;
+    }
+
+    public synchronized boolean isSessionValid(long generation) {
+        return !closed
+                && isRunning()
+                && this.sessionGeneration == generation;
+    }
+
     public synchronized boolean isRunning() {
-        return !closed && (quic != null || kcp != null);
+        return !closed
+                && (quic != null || kcp != null);
     }
 
 }

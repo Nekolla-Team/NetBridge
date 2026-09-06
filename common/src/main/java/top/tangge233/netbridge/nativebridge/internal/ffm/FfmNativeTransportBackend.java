@@ -16,9 +16,9 @@ public final class FfmNativeTransportBackend
     private final FfmNativeContext context;
     private final Map<Long, FfmNativeConnection> connections = new ConcurrentHashMap<>();
     private final Map<Long, FfmNativeServer> servers = new ConcurrentHashMap<>();
-    private final Map<Long, List<Long>> pendingAccepted = new ConcurrentHashMap<>();
-    private final Map<Long, NativeConnectionState> pendingConnectionStates = new ConcurrentHashMap<>();
-
+    private final Map<Long, PendingAcceptedConnection> pendingByConnId = new ConcurrentHashMap<>();
+    private final Map<Long, List<PendingAcceptedConnection>> pendingByServerId = new ConcurrentHashMap<>();
+    private final Map<Long, EarlyClientState> pendingClientStates = new ConcurrentHashMap<>();
     private volatile NativeBackendState state = NativeBackendState.NEW;
 
     private FfmNativeTransportBackend(
@@ -69,6 +69,10 @@ public final class FfmNativeTransportBackend
                     NativeBackendState.CLOSING,
                     "backend closing"
             );
+            case CLOSE_FAILED -> new NativeBackendAvailability(
+                    NativeBackendState.CLOSE_FAILED,
+                    "backend close failed; retry close only"
+            );
             default -> new NativeBackendAvailability(
                     NativeBackendState.UNAVAILABLE,
                     "backend not available"
@@ -86,9 +90,9 @@ public final class FfmNativeTransportBackend
                 request.port(),
                 request.kcpProfile().abiValue()
         );
-        var earlyState = pendingConnectionStates.remove(connId);
-        var initialState = earlyState != null
-                ? earlyState
+        var early = pendingClientStates.remove(connId);
+        var initialState = early != null
+                ? early.state
                 : NativeConnectionState.CONNECTING;
         var conn = new FfmNativeConnection(
                 this,
@@ -99,9 +103,11 @@ public final class FfmNativeTransportBackend
         );
         connections.put(connId, conn);
         // Double check if an event arrived concurrently during instantiation
-        var racedState = pendingConnectionStates.remove(connId);
-        if (racedState != null) {
-            conn.handleStateChanged(racedState);
+        var raced = pendingClientStates.remove(connId);
+        if (raced != null) {
+            conn.handleStateChanged(raced.state, raced.reason);
+        } else if (early != null) {
+            conn.handleStateChanged(early.state, early.reason);
         }
         return conn;
     }
@@ -123,22 +129,30 @@ public final class FfmNativeTransportBackend
                 kind
         );
         servers.put(serverId, server);
-        var buffered = pendingAccepted.remove(serverId);
+        var buffered = pendingByServerId.remove(serverId);
         if (buffered != null) {
-            buffered.forEach(connId -> {
-                var earlyState = pendingConnectionStates.remove(connId);
-                var initialState = earlyState != null
-                        ? earlyState
-                        : NativeConnectionState.CONNECTED;
+            buffered.forEach(pac -> {
+                pendingByConnId.remove(pac.connId);
+                if (pac.terminal) {
+                    try {
+                        context.connectionClose(pac.connId);
+                    } catch (RuntimeException _) {
+                        // ignore
+                    }
+                    return;
+                }
                 var acceptedConn = new FfmNativeConnection(
                         this,
-                        connId,
+                        pac.connId,
                         server,
                         kind,
-                        initialState
+                        pac.state
                 );
-                connections.put(connId, acceptedConn);
+                connections.put(pac.connId, acceptedConn);
                 server.handleAccepted(acceptedConn);
+                if (pac.terminal) {
+                    acceptedConn.handleStateChanged(pac.state, pac.reason);
+                }
             });
         }
         return server;
@@ -152,6 +166,17 @@ public final class FfmNativeTransportBackend
 
         state = NativeBackendState.CLOSING;
         context.dispatcher().removeListener(this);
+
+        for (var pac : pendingByConnId.values()) {
+            try {
+                context.connectionClose(pac.connId);
+            } catch (RuntimeException _) {
+                // ignore
+            }
+        }
+        pendingByConnId.clear();
+        pendingByServerId.clear();
+        pendingClientStates.clear();
 
         try {
             servers.values().forEach(server -> {
@@ -185,8 +210,7 @@ public final class FfmNativeTransportBackend
             library.close();
             state = NativeBackendState.CLOSED;
         } catch (Throwable t) {
-            state = NativeBackendState.AVAILABLE;
-            context.dispatcher().addListener(this);
+            state = NativeBackendState.CLOSE_FAILED;
             if (t instanceof RuntimeException re) {
                 throw re;
             }
@@ -221,10 +245,24 @@ public final class FfmNativeTransportBackend
                 case NativeEvent.KIND_CONNECTION_STATE -> {
                     var conn = connections.get(event.objectId());
                     var mappedState = NativeConnectionState.fromAbi((int) event.arg0());
+                    var reason = NativeFailureReason.fromCode(event.arg1());
                     if (conn != null) {
-                        conn.handleStateChanged(mappedState);
+                        conn.handleStateChanged(mappedState, reason);
                     } else {
-                        pendingConnectionStates.put(event.objectId(), mappedState);
+                        var pac = pendingByConnId.get(event.objectId());
+                        if (pac != null) {
+                            pac.state = mappedState;
+                            pac.reason = reason;
+                            if (mappedState == NativeConnectionState.CLOSED
+                                    || mappedState == NativeConnectionState.FAILED) {
+                                pac.terminal = true;
+                            }
+                        } else {
+                            pendingClientStates.put(
+                                    event.objectId(),
+                                    new EarlyClientState(mappedState, reason)
+                            );
+                        }
                     }
                 }
                 case NativeEvent.KIND_DATA_AVAILABLE -> {
@@ -242,9 +280,17 @@ public final class FfmNativeTransportBackend
                 case NativeEvent.KIND_ACCEPTED -> {
                     var server = servers.get(event.objectId());
                     if (server != null) {
-                        var earlyState = pendingConnectionStates.remove(event.arg0());
-                        var initialState = earlyState != null
-                                ? earlyState
+                        var earlyPac = pendingByConnId.remove(event.arg0());
+                        if (earlyPac != null && earlyPac.terminal) {
+                            try {
+                                context.connectionClose(event.arg0());
+                            } catch (RuntimeException _) {
+                                // ignore
+                            }
+                            return;
+                        }
+                        var initialState = earlyPac != null
+                                ? earlyPac.state
                                 : NativeConnectionState.CONNECTED;
                         var accepted = new FfmNativeConnection(
                                 this,
@@ -254,18 +300,19 @@ public final class FfmNativeTransportBackend
                                 initialState
                         );
                         connections.put(event.arg0(), accepted);
-                        var racedState = pendingConnectionStates.remove(event.arg0());
-                        if (racedState != null) {
-                            accepted.handleStateChanged(racedState);
-                        }
                         server.handleAccepted(accepted);
                     } else {
-                        pendingAccepted
+                        var pac = pendingByConnId
+                                .computeIfAbsent(
+                                        event.arg0(),
+                                        id -> new PendingAcceptedConnection(id, event.objectId())
+                                );
+                        pendingByServerId
                                 .computeIfAbsent(
                                         event.objectId(),
                                         _ -> new CopyOnWriteArrayList<>()
                                 )
-                                .add(event.arg0());
+                                .add(pac);
                     }
                 }
                 case NativeEvent.KIND_SERVER_STATE -> {
@@ -291,6 +338,31 @@ public final class FfmNativeTransportBackend
                     t
             );
         }
+    }
+
+    private static final class PendingAcceptedConnection {
+
+        final long connId;
+        final long serverId;
+        volatile NativeConnectionState state = NativeConnectionState.CONNECTED;
+        volatile NativeFailureReason reason = NativeFailureReason.GENERIC;
+        volatile boolean terminal = false;
+
+        PendingAcceptedConnection(
+                long connId,
+                long serverId
+        ) {
+            this.connId = connId;
+            this.serverId = serverId;
+        }
+
+    }
+
+    private record EarlyClientState(
+            NativeConnectionState state,
+            NativeFailureReason reason
+    ) {
+
     }
 
 }

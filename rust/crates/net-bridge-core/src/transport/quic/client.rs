@@ -190,16 +190,15 @@ fn io_no_address() -> std::io::Error {
 fn fail<T>(
     ctx: &crate::context::NativeContext,
     conn_id: u64,
-    state: &Arc<AtomicU32>,
+    _state: &Arc<AtomicU32>,
     err: BridgeError,
 ) -> Option<T> {
-    state.store(crate::STATE_FAILED, Ordering::SeqCst);
-    ctx.emit_terminal(conn_id);
+    let reason = err.reason_code();
     report_error(err.message());
+    ctx.fail_connection_with_reason(conn_id, reason);
     None
 }
 
-fn cancel(ctx: &crate::context::NativeContext, conn_id: u64, state: &Arc<AtomicU32>) {
-    state.store(STATE_CLOSED, Ordering::SeqCst);
-    ctx.emit_terminal(conn_id);
+fn cancel(ctx: &crate::context::NativeContext, conn_id: u64, _state: &Arc<AtomicU32>) {
+    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_CANCELLED);
 }

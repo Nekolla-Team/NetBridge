@@ -54,12 +54,11 @@ pub async fn run_kcp_connection_with_sink(
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             )
         });
-    let sink = Arc::clone(ctx.event_sink());
     let (stream_r, stream_w) = tokio::io::split(stream);
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let done_guard = reader_done_tx.clone();
     let reader_state = state.clone();
-    let reader_sink = Arc::clone(&sink);
+    let reader_ctx = Arc::clone(&ctx);
     let reader_inbound_bytes = inbound_bytes.clone();
     let reader = tokio::spawn(async move {
         reader_loop(
@@ -68,7 +67,7 @@ pub async fn run_kcp_connection_with_sink(
             to_java_tx,
             reader_state,
             reader_done_tx,
-            reader_sink,
+            reader_ctx,
             reader_inbound_bytes,
         )
         .await;
@@ -90,6 +89,7 @@ pub async fn run_kcp_connection_with_sink(
     .await;
 
     reader.abort();
+    let _ = reader.await;
 }
 
 pub async fn prepare_kcp_data_plane(
@@ -136,7 +136,7 @@ pub async fn prepare_kcp_data_plane(
 
 fn request_fail<T>(
     conn_id: u64,
-    state: &AtomicU32,
+    _state: &AtomicU32,
     result: Result<T, String>,
     ctx: &Arc<NativeContext>,
 ) -> Option<T> {
@@ -144,8 +144,7 @@ fn request_fail<T>(
         Ok(value) => Some(value),
         Err(msg) => {
             report_error(format!("kcp conn {conn_id}: {msg}"));
-            state.store(STATE_FAILED, Ordering::SeqCst);
-            ctx.emit_terminal(conn_id);
+            ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
             None
         }
     }
@@ -157,7 +156,7 @@ async fn reader_loop(
     to_java_tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU32>,
     done_tx: mpsc::Sender<bool>,
-    event_sink: Arc<dyn crate::event::EventSink>,
+    ctx: Arc<NativeContext>,
     inbound_bytes: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let mut payload = BytesMut::with_capacity(64 * 1024);
@@ -177,11 +176,8 @@ async fn reader_loop(
                     inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
                     break true;
                 }
-                // Only emit if not in terminal state
-                let st = state.load(Ordering::SeqCst);
-                if st != crate::STATE_FAILED && st != crate::STATE_CLOSED {
-                    event_sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
-                }
+                // Linearized emit: suppressed if in terminal state
+                ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
             }
             Err(_) if state.load(Ordering::SeqCst) == STATE_CLOSED => break true,
             Err(e) if is_session_closed(&e) => break true,
@@ -217,8 +213,7 @@ async fn drive(
             }
             done = reader_done.recv() => {
                 if done == Some(false) {
-                    state.store(STATE_FAILED, Ordering::SeqCst);
-                    ctx.emit_terminal(conn_id);
+                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
                 }
                 break;
             }
@@ -232,14 +227,13 @@ async fn drive(
                                 true
                             } else {
                                 report_error(format!("kcp conn {conn_id}: write error: {e}"));
-                                state.store(STATE_FAILED, Ordering::SeqCst);
-                                ctx.emit_terminal(conn_id);
+                                ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
                                 true
                             }
                         } else {
                             outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
                             if write_blocked.swap(false, Ordering::SeqCst) {
-                                ctx.event_sink().on_event(NB_EVENT_WRITABLE, conn_id, 0, 0);
+                                ctx.emit_non_terminal(conn_id, NB_EVENT_WRITABLE, 0, 0);
                             }
                             false
                         }

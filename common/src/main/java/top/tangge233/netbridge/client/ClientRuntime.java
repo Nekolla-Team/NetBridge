@@ -44,10 +44,15 @@ public final class ClientRuntime implements AutoCloseable {
             InetSocketAddress tcpAddress,
             ConnectionExecutorAdapter adapter
     ) {
+        var future = new DelegatingChannelFuture(adapter.eventLoopGroup());
         if (closed) {
             stateStore.idle();
-            return adapter.openTcp(tcpAddress);
+            future.completeFailure(new IllegalStateException("ClientRuntime is closed"), null);
+            return future;
         }
+
+        activeFutures.add(future);
+        future.addListener(_ -> activeFutures.remove(future));
 
         var current = settings.current();
         var plan = planner.plan(
@@ -57,15 +62,12 @@ public final class ClientRuntime implements AutoCloseable {
                 successfulEndpoints.lookup(tcpAddress, current.mode()),
                 nativeAvailable()
         );
-        var future = executor.execute(
+        executor.execute(
                 plan,
                 backend,
-                adapter
+                adapter,
+                future
         );
-        if (future instanceof DelegatingChannelFuture dcf) {
-            activeFutures.add(dcf);
-            dcf.addListener(_ -> activeFutures.remove(dcf));
-        }
         return future;
     }
 
