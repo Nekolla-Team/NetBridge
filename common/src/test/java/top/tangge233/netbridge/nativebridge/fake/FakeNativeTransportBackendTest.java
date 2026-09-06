@@ -187,6 +187,55 @@ class FakeNativeTransportBackendTest {
     }
 
     @Test
+    void serverStopDoesNotKillAdoptedConnections() throws Exception {
+        try (var backend = new FakeNativeTransportBackend()) {
+            var server = backend.startServer(
+                    NativeServerRequest.quic(25569, 64)
+            );
+            var acceptedLatch = new CountDownLatch(1);
+            var acceptedRef = new AtomicReference<@Nullable NativeConnection>();
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(NativeConnection connection) {
+                    acceptedRef.set(connection);
+                    acceptedLatch.countDown();
+                }
+            });
+            var client = backend.connect(
+                    NativeConnectRequest.quic("127.0.0.1", 25569)
+            );
+            assertTrue(acceptedLatch.await(1, TimeUnit.SECONDS));
+            var serverConn = Objects.requireNonNull(acceptedRef.get());
+
+            // Stop server
+            server.close();
+
+            // Existing connection remains alive and can do roundtrip I/O
+            var dataAvailable = new CountDownLatch(1);
+            serverConn.setListener(new NativeConnectionListener() {
+                @Override
+                public void onDataAvailable() {
+                    dataAvailable.countDown();
+                }
+            });
+            var msg = "alive after server stop".getBytes(StandardCharsets.UTF_8);
+            var write = client.write(ByteBuffer.wrap(msg));
+            assertEquals(NativeIoResult.progressed(msg.length), write);
+            assertTrue(dataAvailable.await(1, TimeUnit.SECONDS));
+
+            var readBuf = ByteBuffer.allocate(1024);
+            var read = serverConn.read(readBuf);
+            assertEquals(msg.length, read.bytes());
+
+            // New connections are rejected
+            assertThrows(
+                    NativeException.class,
+                    () -> backend.connect(NativeConnectRequest.quic("127.0.0.1", 25569))
+            );
+        }
+    }
+
+    @Test
     void backendCloseClosesEverything() {
         var backend = new FakeNativeTransportBackend();
         var closed = new CountDownLatch(1);

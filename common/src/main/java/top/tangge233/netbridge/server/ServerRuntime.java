@@ -8,12 +8,14 @@ import top.tangge233.netbridge.nativebridge.NativeTransportBackend;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.jspecify.annotations.Nullable;
 
 public final class ServerRuntime implements AutoCloseable {
 
     private final NativeTransportBackend backend;
     private final ServerConfigStore configStore;
+    private final AtomicLong generationSequence = new AtomicLong(1);
     private final ExecutorService adoptExecutor = Executors.newSingleThreadExecutor(r -> {
         var thread = new Thread(r, "net-bridge-adopt");
         thread.setDaemon(true);
@@ -36,7 +38,10 @@ public final class ServerRuntime implements AutoCloseable {
         this.adopter = adopter;
     }
 
-    public synchronized boolean start(int mcPort, @Nullable String mcBindIp) {
+    public synchronized boolean start(
+            int mcPort,
+            @Nullable String mcBindIp
+    ) {
         if (closed) {
             return false;
         }
@@ -50,7 +55,8 @@ public final class ServerRuntime implements AutoCloseable {
                 backend,
                 configStore.load(),
                 adopter,
-                adoptExecutor
+                adoptExecutor,
+                generationSequence.getAndIncrement()
         );
         var started = next.start(mcPort, mcBindIp);
         manager = started

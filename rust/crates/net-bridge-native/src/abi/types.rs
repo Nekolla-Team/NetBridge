@@ -7,6 +7,12 @@ use std::sync::Arc;
 pub const NB_ABI_MAJOR: u32 = 1;
 pub const NB_ABI_MINOR: u32 = 0;
 
+pub const NB_FEATURE_QUIC: u64 = 1 << 0;
+pub const NB_FEATURE_KCP: u64 = 1 << 1;
+pub const NB_FEATURE_WRITABLE_EVENT: u64 = 1 << 2;
+pub const NB_FEATURE_BINARY_SOCKET_ADDRESS: u64 = 1 << 3;
+pub const NB_FEATURE_SERVER_STATE_EVENT: u64 = 1 << 4;
+
 pub const NB_TRANSPORT_QUIC: u32 = 1;
 pub const NB_TRANSPORT_KCP: u32 = 2;
 
@@ -41,6 +47,11 @@ pub struct NbSocketAddressV1 {
     pub scope_id: u32,
     pub reserved1: u32,
 }
+
+pub const NB_CONTEXT_OPTIONS_V1_MIN_SIZE: u32 = 16;
+pub const NB_CALLBACKS_V1_MIN_SIZE: u32 = 16;
+pub const NB_CONNECT_OPTIONS_V1_MIN_SIZE: u32 = 40;
+pub const NB_SERVER_OPTIONS_V1_MIN_SIZE: u32 = 48;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

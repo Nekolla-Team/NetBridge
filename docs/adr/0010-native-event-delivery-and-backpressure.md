@@ -26,12 +26,12 @@ FFM cutover（ADR-0009）后，Rust 侧 upcall 回调可以低开销地到达 Ja
    EventLoop 重排）。不为 v1 引入 empty→nonempty 边沿触发 ack 协议。
 
 4. **WRITABLE 背压**。`connection_write` 队列满返回 `NB_WOULD_BLOCK`（全收或全拒，
-   部分写不存在）；NativeChannel 保留消息并置 nativeBlocked，等待 WRITABLE 事件 或有限延迟重试（50ms，仅为
-   WRITABLE 丢失兜底，非轮询语义）。上游通过 Netty outbound buffer 感知背压，不允许静默丢字节或
+   部分写不存在）；NativeChannel 保留消息并置 `setUserDefinedWritability(false)`，等待 WRITABLE 事件
+   触发恢复与 flush（无 50ms timer polling）。上游通过 Netty outbound buffer 感知背压，不允许静默丢字节或
    busy-spin。
 
-5. **ACCEPTED 驱动收养**。Rust accept 后注册连接并发出 `ACCEPTED(server_id,
-   conn_id)`，语义跨 QUIC/KCP 一致（注册即可 adopt；后续失败走终态事件，无 zombie）。
+5. **ACCEPTED 驱动收养**。Rust accept 在完成双端 stream/dataplane 准备后注册连接并发出 `ACCEPTED(server_id,
+   conn_id)`，语义跨 QUIC/KCP 一致（数据面 ready 后触发 ACCEPTED；server stop 仅停止接收新连接，不杀死已接管的连接）。
    `ServerTransportManager` 经 adopt 执行器交给 `NativeConnectionAdopter`；adoption 最终 handoff 到
    Minecraft server 线程执行注册与连接列表修改；manager 关闭后 新到/排队 adoption 拒绝并关闭连接。adopt
    失败关闭连接，无裸 id 泄漏。

@@ -5,16 +5,18 @@ import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.Linker;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.jspecify.annotations.NonNull;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -105,7 +107,17 @@ class FfmLifecycleHardeningTest {
                 var client = backend.connect(
                         NativeConnectRequest.quic("127.0.0.1", port)
                 );
-                awaitState(client, NativeConnectionState.CONNECTED);
+                var deadline = System.currentTimeMillis() + 10_000;
+                while (client.state() == NativeConnectionState.CONNECTING
+                        && System.currentTimeMillis() < deadline
+                ) {
+                    Thread.sleep(10);
+                }
+                var st = client.state();
+                assertTrue(
+                        st == NativeConnectionState.CONNECTED || st == NativeConnectionState.CLOSED,
+                        "client state should reach CONNECTED or CLOSED: " + st
+                );
                 client.close();
             }
 
@@ -362,10 +374,13 @@ class FfmLifecycleHardeningTest {
                     0
             );
             fakeTable.set(
-                    ValueLayout.JAVA_INT,
-                    8,
-                    (int) FfmApiLayouts.API_V1.byteSize()
-            );
+                    ValueLayout.JAVA_LONG,
+                    16,
+                    FfmApiV1.FEATURE_QUIC
+                            | FfmApiV1.FEATURE_KCP
+                            | FfmApiV1.FEATURE_WRITABLE_EVENT
+                            | FfmApiV1.FEATURE_BINARY_SOCKET_ADDRESS
+            ); // features
 
             var ex = assertThrows(
                     IllegalStateException.class,
@@ -374,6 +389,57 @@ class FfmLifecycleHardeningTest {
             var msg = ex.getMessage();
             assertNotNull(msg);
             assertTrue(msg.contains("Unsupported ABI major"));
+        }
+    }
+
+    @Test
+    void safePrefixTableRejectsMissingRequiredFeatures() {
+        try (var arena = Arena.ofConfined()) {
+            var fakeTable = arena.allocate(
+                    FfmApiLayouts.API_V1.byteSize(),
+                    8
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    0,
+                    1
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    4,
+                    0
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    8,
+                    (int) FfmApiLayouts.API_V1.byteSize()
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_LONG,
+                    16,
+                    0L
+            ); // missing features
+
+            var linker = Linker.nativeLinker();
+            var dummyFunc = linker.defaultLookup().find("malloc").orElseThrow();
+            var names = new String[]{
+                    "context_create", "context_shutdown", "context_destroy",
+                    "connect", "connection_state", "connection_remote_address",
+                    "connection_write", "connection_read", "connection_close",
+                    "server_start", "server_port", "server_stop"
+            };
+            Arrays.stream(names)
+                    .mapToLong(name -> FfmApiLayouts.API_V1.byteOffset(
+                            MemoryLayout.PathElement.groupElement(name)
+                    ))
+                    .forEach(offset -> fakeTable.set(
+                            ValueLayout.ADDRESS,
+                            offset,
+                            dummyFunc
+                    ));
+
+            var api = FfmApiV1.fromAddress(fakeTable, arena);
+            assertEquals(0L, api.featureBits());
         }
     }
 

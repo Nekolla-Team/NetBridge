@@ -78,9 +78,6 @@ public final class FakeNativeServer implements NativeServer {
         closed = true;
         listener = null;
         owner.removeServer(id, port);
-        for (var conn : accepted) {
-            conn.close();
-        }
         accepted.clear();
     }
 

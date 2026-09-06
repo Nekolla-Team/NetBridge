@@ -22,6 +22,12 @@ public record FfmApiV1(
         long featureBits
 ) {
 
+    public static final long FEATURE_QUIC = 1L << 0;
+    public static final long FEATURE_KCP = 1L << 1;
+    public static final long FEATURE_WRITABLE_EVENT = 1L << 2;
+    public static final long FEATURE_BINARY_SOCKET_ADDRESS = 1L << 3;
+    public static final long FEATURE_SERVER_STATE_EVENT = 1L << 4;
+
     private FfmApiV1(
             int abiMajor,
             int abiMinor,

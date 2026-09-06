@@ -72,7 +72,8 @@
 - **连接状态快照**：`ConnectionStateStore` 发布不可变 `ConnectionSnapshot`
   （CONNECTING/CONNECTED/FALLING_BACK/IDLE），ConnectScreen 与 F3 行只读快照，
   `ConnectStatus`/`ConnectionDisplay` 静态类已删除。
-- **握手存活判定**：QUIC 的 CONNECTED = 明文握手完成； **KCP 的 CONNECTED = kcp-rs SYN 握手完成**（
+- **握手存活判定**：QUIC 的 CONNECTED = 明文握手与双向数据流就绪； **KCP 的 CONNECTED = KCP 传输握手 +
+  FEC + smux 会话建立并打开 MC 数据流**（
   `connect_timeout` 8s 内无应答直接 FAILED）。看门狗由
   `ConnectionExecutor` 承载，超时 abort 连接并计入当次尝试失败。
 - **连接提示 / F3 行**：语义不变（ADR-0005），数据源改为 runtime 快照。
@@ -81,9 +82,11 @@
 
 - **ServerRuntime / ServerTransportManager**：session-scoped、AutoCloseable；事务式
   start（解析配置快照 → 逐传输 `backend.startServer` → 查询实际端口 → 原子发布 announcement；失败
-  reverse-close）。单传输 bind 失败不阻塞另一传输；两个都失败时 vanilla TCP 继续。
-- **ACCEPTED 驱动收养**：新连接经 `NativeConnectionAdopter` 在 adopt 执行器上收养进 MC 管线；adopt
-  失败关闭连接。无裸 long handle、无 5ms accept 轮询线程。
+  reverse-close）。单传输 bind 失败不阻塞另一传输；两个都失败时 vanilla TCP 继续。server stop
+  仅停止新连接接收，不主动杀死已交付的连接。
+- **ACCEPTED 驱动收养**：QUIC/KCP 双端数据流完全建立且注册完成之后才触发 `ACCEPTED`；新连接经
+  `NativeConnectionAdopter` 在 adopt 执行器上带 generation 校验收养进 MC 管线；adopt 失败关闭连接。无裸
+  long handle、无 5ms accept 轮询线程。
 - **服务端 `[quic]`/`[kcp]` 段**：`enable`（ **quic 默认 true，kcp 默认 false**）/ `bind` /
   `host` / `port`（-1 跟随 MC 端口， **kcp 为 MC 端口+1**；0 随机；越界或 bind 失败→ 日志报错并禁用该传输）/
   `max_connection`（默认 256，达限静默丢弃新客户端——防 UDP 反射，quic/kcp 独立计数）。ping 条目恒下发

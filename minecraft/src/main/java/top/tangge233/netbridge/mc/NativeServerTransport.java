@@ -24,6 +24,14 @@ public final class NativeServerTransport {
             MinecraftServer server,
             NativeConnection connection
     ) {
+        adopt(server, connection, 0L);
+    }
+
+    public static void adopt(
+            MinecraftServer server,
+            NativeConnection connection,
+            long sessionGeneration
+    ) {
         server.execute(() -> {
             var channel = new NativeChannel(connection);
             try {
@@ -53,7 +61,7 @@ public final class NativeServerTransport {
             );
 
             var serverConnection = server.getConnection();
-            if (serverConnection == null) {
+            if (serverConnection == null || !server.isRunning()) {
                 channel.close();
                 return;
             }
@@ -64,12 +72,13 @@ public final class NativeServerTransport {
                 if (f.isSuccess()) {
                     server.execute(() -> {
                         var sc = server.getConnection();
-                        if (sc != null && channel.isOpen()) {
+                        if (sc != null && server.isRunning() && channel.isOpen()) {
                             sc.getConnections().add(mcConnection);
                             NetBridge.LOGGER.info(
-                                    "Connection {} adopted into server pipeline (channel {})",
+                                    "Connection {} adopted into server pipeline (channel {}, session {})",
                                     connection.id(),
-                                    channel.connId()
+                                    channel.connId(),
+                                    sessionGeneration
                             );
                         } else {
                             channel.close();

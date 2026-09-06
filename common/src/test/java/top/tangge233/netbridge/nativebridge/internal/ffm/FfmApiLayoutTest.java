@@ -232,6 +232,14 @@ class FfmApiLayoutTest {
                 16,
                 FfmApiLayouts.API_V1.byteOffset(PathElement.groupElement("feature_bits"))
         );
+        assertEquals(
+                0b11111L,
+                FfmApiV1.FEATURE_QUIC
+                        | FfmApiV1.FEATURE_KCP
+                        | FfmApiV1.FEATURE_WRITABLE_EVENT
+                        | FfmApiV1.FEATURE_BINARY_SOCKET_ADDRESS
+                        | FfmApiV1.FEATURE_SERVER_STATE_EVENT
+        );
 
         assertEquals(
                 24,

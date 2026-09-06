@@ -25,19 +25,39 @@ pub async fn run_connection_with_sink(
     state: Arc<AtomicU32>,
     ctx: Arc<NativeContext>,
 ) {
-    let write_blocked = ctx
+    let (write_blocked, outbound_bytes, inbound_bytes) = ctx
         .conns()
         .get(&conn_id)
-        .map(|h| h.write_blocked.clone())
-        .unwrap_or_default();
+        .map(|h| {
+            (
+                h.write_blocked.clone(),
+                h.outbound_bytes.clone(),
+                h.inbound_bytes.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+        });
     let sink = Arc::clone(ctx.event_sink());
-    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<()>(1);
+    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let reader = {
         let _to_transport_tx = to_transport_tx.clone();
         let sink = Arc::clone(&sink);
+        let inbound_bytes = inbound_bytes.clone();
+        let reader_state = state.clone();
         tokio::spawn(async move {
             let mut empty_streak = 0u32;
+            let mut clean_exit = true;
             loop {
+                // Inbound byte budget backpressure
+                while inbound_bytes.load(Ordering::SeqCst) >= crate::DEFAULT_MAX_BUFFERED_BYTES {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+
                 match recv.read_chunk(65536, true).await {
                     Ok(Some(chunk)) => {
                         if chunk.bytes.is_empty() {
@@ -48,16 +68,29 @@ pub async fn run_connection_with_sink(
                             continue;
                         }
                         empty_streak = 0;
+                        let chunk_len = chunk.bytes.len();
+                        inbound_bytes.fetch_add(chunk_len, Ordering::SeqCst);
                         if to_java_tx.send(chunk.bytes).await.is_err() {
+                            inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
                             break;
                         }
-                        sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
+                        // Only emit if not in terminal state
+                        let st = reader_state.load(Ordering::SeqCst);
+                        if st != crate::STATE_FAILED && st != crate::STATE_CLOSED {
+                            sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
+                        }
                     }
                     Ok(None) => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        if reader_state.load(Ordering::SeqCst) != crate::STATE_CLOSED {
+                            crate::report_error(format!("quic conn {conn_id}: read error: {e}"));
+                            clean_exit = false;
+                        }
+                        break;
+                    }
                 }
             }
-            let _ = reader_done_tx.send(()).await;
+            let _ = reader_done_tx.send(clean_exit).await;
         })
     };
 
@@ -70,15 +103,28 @@ pub async fn run_connection_with_sink(
             _ = cancel_rx.changed() => {
                 break;
             }
-            _ = reader_done_rx.recv() => break,
+            done = reader_done_rx.recv() => {
+                if done == Some(false) && state.load(Ordering::SeqCst) != STATE_CLOSED {
+                    state.store(crate::STATE_FAILED, Ordering::SeqCst);
+                    ctx.emit_terminal(conn_id);
+                }
+                break;
+            }
             cmd = to_transport_rx.recv() => match cmd {
                 Some(Command::Write(bytes)) => {
+                    let bytes_len = bytes.len();
                     if send.write_all(&bytes).await.is_err() {
+                        outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
                         state.store(crate::STATE_FAILED, Ordering::SeqCst);
                         ctx.emit_terminal(conn_id);
                         break;
                     }
-                    if write_blocked.swap(false, Ordering::SeqCst) {
+                    outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
+                    let st = state.load(Ordering::SeqCst);
+                    if st != crate::STATE_FAILED
+                        && st != crate::STATE_CLOSED
+                        && write_blocked.swap(false, Ordering::SeqCst)
+                    {
                         sink.on_event(crate::event::NB_EVENT_WRITABLE, conn_id, 0, 0);
                     }
                 }

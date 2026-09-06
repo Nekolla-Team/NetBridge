@@ -104,7 +104,8 @@ public final class ConnectionExecutor {
                     backend,
                     attempt,
                     adapter,
-                    attemptNumber
+                    attemptNumber,
+                    result
             );
         } catch (Throwable t) {
             handleAttemptFailure(
@@ -188,7 +189,7 @@ public final class ConnectionExecutor {
                         result
                 );
             } else {
-                adapter.eventLoopGroup().next().schedule(
+                var scheduled = adapter.eventLoopGroup().next().schedule(
                         () -> runAttempt(
                                 plan,
                                 backend,
@@ -200,6 +201,7 @@ public final class ConnectionExecutor {
                         delay,
                         TimeUnit.MILLISECONDS
                 );
+                result.registerScheduledTask(scheduled);
             }
             return;
         }
@@ -232,7 +234,8 @@ public final class ConnectionExecutor {
             NativeTransportBackend backend,
             ConnectionPlan.NativeAttemptPlan attempt,
             ConnectionExecutorAdapter adapter,
-            int attemptNumber
+            int attemptNumber,
+            DelegatingChannelFuture result
     ) {
         var connection = backend.connect(buildRequest(attempt));
         var channel = new NativeChannel(connection);
@@ -259,6 +262,7 @@ public final class ConnectionExecutor {
                 retryPolicy.timeoutMillisForAttempt(attemptNumber),
                 TimeUnit.MILLISECONDS
         );
+        result.registerScheduledTask(watchdog);
         future.addListener(_ -> watchdog.cancel(false));
         return future;
     }

@@ -123,10 +123,15 @@ async fn establish(
         Ok(conn) => conn,
         Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
-    let (send, recv) = match conn.open_bi().await {
+    let (mut send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,
         Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
+    // In Quinn / QUIC, opening a bidirectional stream is lazy until bytes are written.
+    // Send 1-byte handshake probe (0x00) so peer's accept_bi() unblocks and discovers the stream!
+    if let Err(e) = send.write_all(&[0x00]).await {
+        return fail(ctx, conn_id, state, connect_error(addr, e));
+    }
     if state.load(Ordering::SeqCst) == STATE_CLOSED {
         cancel(ctx, conn_id, state);
         return None;

@@ -229,3 +229,48 @@ fn kcp_peer_close_propagates_to_client() {
     ctx.close_connection(client);
     ctx.stop_server(server);
 }
+
+#[test]
+fn kcp_server_stop_does_not_kill_adopted_connections() {
+    let (ctx, sink) = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
+        .expect("start kcp server");
+    let port = ctx.server_port(server).expect("kcp server port");
+    let client = ctx
+        .connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced)
+        .expect("kcp connect");
+
+    assert_eq!(
+        ctx.write_chunk(client, Bytes::copy_from_slice(b"warm-up"))
+            .expect("warm-up write"),
+        7
+    );
+
+    let server_conn = wait_accepted(&sink, server);
+    wait_state(&ctx, server_conn, STATE_CONNECTED);
+
+    // Stop server
+    assert!(ctx.stop_server(server), "stop server 必须成功");
+
+    // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
+    let payload = b"kcp data after server stopped";
+    assert_eq!(
+        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+            .expect("client write"),
+        payload.len()
+    );
+    assert_eq!(wait_read(&ctx, server_conn, payload.len()), payload);
+
+    let reply = b"kcp server reply after server stopped";
+    assert_eq!(
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+            .expect("server write"),
+        reply.len()
+    );
+    assert_eq!(wait_read(&ctx, client, reply.len()), reply);
+
+    // 清理连接
+    ctx.close_connection(client);
+    ctx.close_connection(server_conn);
+}

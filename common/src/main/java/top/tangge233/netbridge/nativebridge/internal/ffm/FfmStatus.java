@@ -34,7 +34,8 @@ public final class FfmStatus {
                         operation,
                         status,
                         describe(status)
-                )
+                ),
+                status
         );
     }
 

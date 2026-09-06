@@ -30,11 +30,15 @@ public class NetBridgeNeoForgeMod {
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> {
             var server = e.getServer();
             var serverRuntime = NetBridgeServices.serverRuntime();
-            serverRuntime.setAdopter(connection -> NativeServerTransport.adopt(
+            serverRuntime.setAdopter((connection, generation) -> NativeServerTransport.adopt(
                     server,
-                    connection
+                    connection,
+                    generation
             ));
-            serverRuntime.start(server.getPort(), server.getLocalIp());
+            serverRuntime.start(
+                    server.getPort(),
+                    server.getLocalIp()
+            );
         });
         NeoForge.EVENT_BUS.addListener((ServerStoppingEvent _) -> {
             var serverRuntime = NetBridgeServices.serverRuntime();

@@ -126,6 +126,111 @@ fn quic_loopback_roundtrip() {
     wait_terminal(&ctx, client);
 }
 
+#[tokio::test]
+async fn quic_server_stop_does_not_kill_adopted_connections() {
+    let (ctx, sink) = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Quic, 0, 256, None, Default::default())
+        .expect("start server");
+    let port = ctx.server_port(server).expect("server port");
+    let client = ctx
+        .connect(TransportKind::Quic, "127.0.0.1", port, Default::default())
+        .expect("connect");
+    wait_state(&ctx, client, STATE_CONNECTED);
+    let server_conn = wait_accepted(&sink, server);
+    wait_state(&ctx, server_conn, STATE_CONNECTED);
+
+    // Stop server
+    assert!(ctx.stop_server(server), "stop server 必须成功");
+
+    // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
+    let payload = b"data after server stopped";
+    assert_eq!(
+        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+            .expect("client write"),
+        payload.len()
+    );
+    assert_eq!(wait_read(&ctx, server_conn, payload.len()), payload);
+
+    let reply = b"server reply after server stopped";
+    assert_eq!(
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+            .expect("server write"),
+        reply.len()
+    );
+    assert_eq!(wait_read(&ctx, client, reply.len()), reply);
+
+    // 清理连接
+    ctx.close_connection(client);
+    ctx.close_connection(server_conn);
+}
+
+#[tokio::test]
+async fn quic_accepted_guarantees_stream_readiness_and_no_accepted_on_stream_failure() {
+    use quinn::Endpoint;
+
+    let (ctx, sink) = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Quic, 0, 256, None, Default::default())
+        .expect("start server");
+    let port = ctx.server_port(server).expect("server port");
+
+    // Client connects via raw quinn WITHOUT opening any bidi stream
+    let mut client_endpoint =
+        Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
+    client_endpoint.set_default_client_config(quinn_plaintext::client_config());
+    let conn = client_endpoint
+        .connect(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            "plaintext.test",
+        )
+        .expect("connect")
+        .await
+        .expect("connected");
+
+    // Wait some time; because no stream is opened, server MUST NOT emit ACCEPTED
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let accepted_events: Vec<_> = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, o, _, _)| *k == NB_EVENT_ACCEPTED && *o == server)
+        .cloned()
+        .collect();
+    assert!(
+        accepted_events.is_empty(),
+        "在建立双向 stream 之前，服务端绝不能发送 ACCEPTED 事件！"
+    );
+
+    // Now client opens a bidi stream and sends a small message (probe + trigger)
+    let (mut send, mut recv) = conn.open_bi().await.expect("open bi");
+    send.write_all(b"\x00trigger").await.expect("write");
+
+    // Now ACCEPTED must be emitted
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let server_conn = wait_accepted(&sink, server);
+    assert_eq!(ctx.connection_state(server_conn), Some(STATE_CONNECTED));
+    assert!(ctx.connection_remote_addr(server_conn).is_some());
+
+    // Server reads the trigger data
+    assert_eq!(wait_read(&ctx, server_conn, 7), b"trigger");
+
+    // Server replies
+    assert_eq!(
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(b"ack"))
+            .expect("server write"),
+        3
+    );
+    let mut buf = [0u8; 3];
+    recv.read_exact(&mut buf).await.expect("recv ack");
+    assert_eq!(&buf, b"ack");
+
+    conn.close(0u32.into(), b"done");
+    ctx.close_connection(server_conn);
+    ctx.stop_server(server);
+}
+
 #[test]
 fn quic_peer_close_propagates_to_client() {
     let (ctx, sink) = test_ctx();

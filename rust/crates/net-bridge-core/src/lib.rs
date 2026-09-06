@@ -37,6 +37,11 @@ pub const STATE_CONNECTED: u32 = 1;
 pub const STATE_CLOSED: u32 = 2;
 pub const STATE_FAILED: u32 = 3;
 
+/// 默认出站/入站单连接字节预算上限 (4 MiB)
+pub const DEFAULT_MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+/// 单次 I/O chunk 最大上限 (64 KiB)
+pub const MAX_IO_CHUNK: usize = 64 * 1024;
+
 /// 单条连接的句柄。
 pub struct ConnHandle {
     pub state: Arc<AtomicU32>,
@@ -51,8 +56,12 @@ pub struct ConnHandle {
     /// 连接期即可写入：KCP 客户端握手未完成时允许写入（命令先入 channel，
     /// 握手完成后立即下发；kcp-rs 内建握手，不依赖首帧判定）。QUIC 客户端为 false。
     pub early_write: bool,
-    /// 写队列满 → 传输任务消费出空间后清零并 edge-trigger 发 WRITABLE。
+    /// 写队列满 / byte budget 耗尽 → 传输任务消费出空间后清零并 edge-trigger 发 WRITABLE。
     pub write_blocked: Arc<AtomicBool>,
+    /// 在途出站字节数（FFI write 增加，传输任务消费后减少）。
+    pub outbound_bytes: Arc<AtomicUsize>,
+    /// 在途入站字节数（传输 reader 读入增加，Java read 消费后减少）。
+    pub inbound_bytes: Arc<AtomicUsize>,
     /// 终态事件（FAILED/CLOSED）只发一次的闸。
     pub terminal_sent: AtomicBool,
     /// 连接真实对端地址（Java 侧 ban/限速等 IP 管控）。
@@ -81,6 +90,8 @@ impl ConnHandle {
             server_count,
             early_write,
             write_blocked: Arc::new(AtomicBool::new(false)),
+            outbound_bytes: Arc::new(AtomicUsize::new(0)),
+            inbound_bytes: Arc::new(AtomicUsize::new(0)),
             terminal_sent: AtomicBool::new(false),
             remote_addr,
         }
@@ -95,11 +106,13 @@ pub struct ServerHandle {
     pub max_connections: usize,
     /// 本实例活跃连接数（独立于其他 server 实例）。
     pub conn_count: Arc<AtomicUsize>,
+    /// 服务端运行状态：true 表示正在接收连接，stop_server 时设为 false。
+    pub is_running: Arc<AtomicBool>,
 }
 
 /// 传输端点：`stop_server` 按此分支关闭。
 pub enum TransportEndpoint {
-    Quic(quinn::Endpoint),
+    Quic(tokio::sync::mpsc::Sender<()>),
     /// KCP 停止触发器：发送即令 accept 任务退出并 Drop listener
     /// （中止任务、关闭 socket）。listener 本体留在 accept 任务内。
     Kcp(tokio::sync::mpsc::Sender<()>),

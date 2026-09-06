@@ -1,9 +1,11 @@
 # ADR-0008: 传输握手超时与存活判定
 
-状态：已接受 · 日期：2026-08-26 · 依赖：ADR-0002（watchdog 定义）
+状态：已接受（Java 25 + FFM Round 4 修正） · 日期：2026-08-26 · 依赖：ADR-0002（watchdog 定义）
 
 > 实现备注：看门狗现在由 client runtime 的 `ConnectionPlanner` / `ConnectionExecutor`
 > （`NativeRetryPolicy` 10s/20s）承载，不再是旧 static `HandshakeWatchdog` 工具类。
+> 握手与 CONNECTED 存活判定在 Round 4 中统一为数据面就绪契约：KCP 完成 SYN + FEC + smux stream
+> 打开，QUIC 完成明文握手 + stream 探针就绪。
 
 ## 背景
 

@@ -85,10 +85,10 @@ public final class FfmNativeServer implements NativeServer {
         acceptedChildren.remove(connection);
     }
 
-    void handleStateChanged() {
+    void handleStateChanged(NativeServerState newState) {
         var l = listener;
         if (l != null) {
-            l.onStateChanged(NativeServerState.RUNNING);
+            l.onStateChanged(newState);
         }
     }
 

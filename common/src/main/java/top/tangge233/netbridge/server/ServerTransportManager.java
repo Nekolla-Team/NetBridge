@@ -21,6 +21,7 @@ public final class ServerTransportManager {
     private final ServerSettings settings;
     private final @Nullable NativeConnectionAdopter adopter;
     private final Executor adoptExecutor;
+    private final long sessionGeneration;
 
     private @Nullable NativeServer quic;
     private @Nullable NativeServer kcp;
@@ -33,10 +34,27 @@ public final class ServerTransportManager {
             @Nullable NativeConnectionAdopter adopter,
             Executor adoptExecutor
     ) {
+        this(
+                backend,
+                settings,
+                adopter,
+                adoptExecutor,
+                System.nanoTime()
+        );
+    }
+
+    public ServerTransportManager(
+            NativeTransportBackend backend,
+            ServerSettings settings,
+            @Nullable NativeConnectionAdopter adopter,
+            Executor adoptExecutor,
+            long sessionGeneration
+    ) {
         this.backend = backend;
         this.settings = settings;
         this.adopter = adopter;
         this.adoptExecutor = adoptExecutor;
+        this.sessionGeneration = sessionGeneration;
     }
 
     public synchronized boolean start(
@@ -205,7 +223,7 @@ public final class ServerTransportManager {
             }
 
             try {
-                handler.adopt(connection);
+                handler.adopt(connection, sessionGeneration);
             } catch (Throwable t) {
                 NetBridge.LOGGER.warn(
                         "Connection handler failed for conn {}",

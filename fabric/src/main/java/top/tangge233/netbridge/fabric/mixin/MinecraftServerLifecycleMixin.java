@@ -19,8 +19,8 @@ public class MinecraftServerLifecycleMixin {
     private void netbridge$startAcceptors(CallbackInfo ci) {
         var self = (MinecraftServer) (Object) this;
         var serverRuntime = NetBridgeServices.serverRuntime();
-        serverRuntime.setAdopter(connection ->
-                NativeServerTransport.adopt(self, connection)
+        serverRuntime.setAdopter((connection, generation) ->
+                NativeServerTransport.adopt(self, connection, generation)
         );
         serverRuntime.start(
                 self.getPort(),

@@ -194,3 +194,112 @@ fn c_abi_quic_loopback_roundtrip() {
     assert_eq!(unsafe { (api.context_shutdown.unwrap())(ctx, 2000) }, NB_OK);
     assert_eq!(unsafe { (api.context_destroy.unwrap())(ctx) }, NB_OK);
 }
+
+#[test]
+fn prefix_safe_options_and_reserved_zero_validation() {
+    let mut api_ptr: *const NbApiV1 = ptr::null();
+    assert_eq!(unsafe { netbridge_get_api(1, 0, &mut api_ptr) }, NB_OK);
+    let api = unsafe { &*api_ptr };
+
+    // 1. Min prefix callback works
+    #[repr(C)]
+    struct MinCallbacks {
+        struct_size: u32,
+        reserved0: u32,
+        on_event: NbEventCallbackV1,
+    }
+    let min_cb = MinCallbacks {
+        struct_size: 16,
+        reserved0: 0,
+        on_event: Some(test_on_event),
+    };
+    let mut ctx: *mut NbContext = ptr::null_mut();
+    assert_eq!(
+        unsafe { (api.context_create.unwrap())(ptr::null(), min_cb_ptr(&min_cb), &mut ctx) },
+        NB_OK
+    );
+    assert!(!ctx.is_null());
+
+    // 2. Nonzero reserved callbacks rejected
+    let bad_cb = MinCallbacks {
+        struct_size: 16,
+        reserved0: 1, // Nonzero!
+        on_event: Some(test_on_event),
+    };
+    let mut bad_ctx: *mut NbContext = ptr::null_mut();
+    assert_eq!(
+        unsafe { (api.context_create.unwrap())(ptr::null(), min_cb_ptr(&bad_cb), &mut bad_ctx) },
+        NB_INVALID_ARGUMENT
+    );
+
+    // 3. Min prefix server options works
+    #[repr(C)]
+    struct MinServerOptions {
+        struct_size: u32,
+        transport_kind: u32,
+        bind_host_utf8: NbBytesViewV1,
+        port: u16,
+        reserved0: u16,
+        max_connections: u32,
+        kcp_profile: u32,
+        flags: u32,
+        reserved1: u32,
+    }
+    let min_srv = MinServerOptions {
+        struct_size: 48,
+        transport_kind: NB_TRANSPORT_QUIC,
+        bind_host_utf8: NbBytesViewV1 {
+            data: b"127.0.0.1".as_ptr(),
+            length: 9,
+            reserved0: 0,
+        },
+        port: 0,
+        reserved0: 0,
+        max_connections: 4,
+        kcp_profile: 0,
+        flags: 0,
+        reserved1: 0,
+    };
+    let mut srv_id: u64 = 0;
+    assert_eq!(
+        unsafe { (api.server_start.unwrap())(ctx, min_srv_ptr(&min_srv), &mut srv_id,) },
+        NB_OK
+    );
+    assert_ne!(srv_id, 0);
+
+    // 4. Nonzero reserved bytes view rejected
+    let bad_srv = MinServerOptions {
+        struct_size: 48,
+        transport_kind: NB_TRANSPORT_QUIC,
+        bind_host_utf8: NbBytesViewV1 {
+            data: b"127.0.0.1".as_ptr(),
+            length: 9,
+            reserved0: 1, // Nonzero!
+        },
+        port: 0,
+        reserved0: 0,
+        max_connections: 4,
+        kcp_profile: 0,
+        flags: 0,
+        reserved1: 0,
+    };
+    let mut bad_srv_id: u64 = 0;
+    assert_eq!(
+        unsafe { (api.server_start.unwrap())(ctx, min_srv_ptr(&bad_srv), &mut bad_srv_id,) },
+        NB_INVALID_ARGUMENT
+    );
+
+    unsafe {
+        (api.server_stop.unwrap())(ctx, srv_id);
+        (api.context_shutdown.unwrap())(ctx, 1000);
+        (api.context_destroy.unwrap())(ctx);
+    }
+}
+
+fn min_cb_ptr(p: &impl Sized) -> *const NbCallbacksV1 {
+    p as *const _ as *const NbCallbacksV1
+}
+
+fn min_srv_ptr(p: &impl Sized) -> *const NbServerOptionsV1 {
+    p as *const _ as *const NbServerOptionsV1
+}

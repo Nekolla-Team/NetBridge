@@ -50,7 +50,20 @@ public final class FfmNativeLibrary implements AutoCloseable {
             if (tableAddr.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("netbridge_get_api returned null API table");
             }
+
             var api = FfmApiV1.fromAddress(tableAddr, arena);
+            var requiredFeatures = FfmApiV1.FEATURE_QUIC
+                    | FfmApiV1.FEATURE_KCP
+                    | FfmApiV1.FEATURE_WRITABLE_EVENT
+                    | FfmApiV1.FEATURE_BINARY_SOCKET_ADDRESS;
+            if ((api.featureBits() & requiredFeatures) != requiredFeatures) {
+                throw new IllegalStateException(
+                        "Native library missing required feature bits: expected at least %d, got %d".formatted(
+                                requiredFeatures,
+                                api.featureBits()
+                        )
+                );
+            }
 
             return new FfmNativeLibrary(
                     arena,
@@ -194,6 +207,18 @@ public final class FfmNativeLibrary implements AutoCloseable {
     @Override
     public void close() {
         synchronized (stateLock) {
+            while (state == State.CLOSING) {
+                try {
+                    stateLock.wait(20);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted while waiting for closing library",
+                            e
+                    );
+                }
+            }
+
             if (state == State.CLOSED) {
                 return;
             }
@@ -203,6 +228,8 @@ public final class FfmNativeLibrary implements AutoCloseable {
                 try {
                     stateLock.wait(20);
                 } catch (InterruptedException e) {
+                    state = State.OPEN;
+                    stateLock.notifyAll();
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(
                             "Interrupted while waiting for in-flight context creations",
@@ -224,6 +251,10 @@ public final class FfmNativeLibrary implements AutoCloseable {
         }
 
         if (firstError != null || !activeContexts.isEmpty()) {
+            synchronized (stateLock) {
+                state = State.OPEN;
+                stateLock.notifyAll();
+            }
             throw new IllegalStateException(
                     "Cannot safely close FfmNativeLibrary Arena: %d contexts still active".formatted(
                             activeContexts.size()

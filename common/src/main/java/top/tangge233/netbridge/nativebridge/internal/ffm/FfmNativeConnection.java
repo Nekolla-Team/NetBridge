@@ -213,19 +213,20 @@ public final class FfmNativeConnection implements NativeConnection {
         }
     }
 
-    private void releaseServerOwnership() {
-        if (ownerServer != null) {
-            ownerServer.removeChild(this);
-        }
-    }
-
     private void markClosedByQuery() {
         var prev = state;
         state = NativeConnectionState.CLOSED;
         owner.unregisterConnection(id);
+        releaseServerOwnership();
         var l = listener;
         if (l != null && prev != NativeConnectionState.CLOSED) {
             l.onStateChanged(NativeConnectionState.CLOSED);
+        }
+    }
+
+    private void releaseServerOwnership() {
+        if (ownerServer != null) {
+            ownerServer.removeChild(this);
         }
     }
 
@@ -249,6 +250,7 @@ public final class FfmNativeConnection implements NativeConnection {
 
         if (newState == NativeConnectionState.CLOSED || newState == NativeConnectionState.FAILED) {
             owner.unregisterConnection(id);
+            releaseServerOwnership();
         }
     }
 

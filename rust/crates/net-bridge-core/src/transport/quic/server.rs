@@ -47,36 +47,45 @@ pub fn start_server_in_context(
 
     let server_id = ctx.allocate_id()?;
     let conn_count = Arc::new(AtomicUsize::new(0));
+    let is_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<()>(1);
     let accept_endpoint = endpoint.clone();
     let accept_counter = Arc::clone(&conn_count);
+    let accept_is_running = Arc::clone(&is_running);
     ctx.servers_map().insert(
         server_id,
         ServerHandle {
-            endpoint: TransportEndpoint::Quic(endpoint),
+            endpoint: TransportEndpoint::Quic(stop_tx),
             port: actual_port,
             max_connections,
             conn_count,
+            is_running,
         },
     );
 
     let ctx_clone = Arc::clone(ctx);
     ctx.spawn_server_task("quic accept loop in context", server_id, async move {
         loop {
-            let incoming = match accept_endpoint.accept().await {
-                Some(incoming) => incoming,
-                None => break,
+            let incoming = tokio::select! {
+                _ = stop_rx.recv() => None,
+                acc = accept_endpoint.accept() => acc,
+            };
+            let Some(incoming) = incoming else {
+                break;
             };
             if accept_counter.load(Ordering::Relaxed) >= max_connections {
                 drop(incoming);
                 continue;
             }
             let conn_counter = Arc::clone(&accept_counter);
+            let conn_is_running = Arc::clone(&accept_is_running);
             let c = Arc::clone(&ctx_clone);
             c.handle().spawn(serve_incoming_in_context(
                 c.clone(),
                 server_id,
                 incoming,
                 conn_counter,
+                conn_is_running,
                 max_connections,
             ));
         }
@@ -89,6 +98,7 @@ async fn serve_incoming_in_context(
     server_id: u64,
     incoming: quinn::Incoming,
     conn_counter: Arc<AtomicUsize>,
+    is_running: Arc<std::sync::atomic::AtomicBool>,
     max_connections: usize,
 ) {
     let peer = incoming.remote_address();
@@ -98,17 +108,36 @@ async fn serve_incoming_in_context(
     if !try_admit(&conn_counter, max_connections) {
         return;
     }
-    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+    // Await bidirectional data stream before committing and emitting ACCEPTED
+    let (send, mut recv) = match conn.accept_bi().await {
+        Ok(pair) => pair,
+        Err(_) => {
+            conn_counter.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    // Consume the 1-byte handshake probe
+    let mut probe = [0u8; 1];
+    if recv.read_exact(&mut probe).await.is_err() {
+        conn_counter.fetch_sub(1, Ordering::Relaxed);
+        return;
+    }
+
     let Ok(conn_id) = ctx.allocate_id() else {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
         return;
     };
-    let server_running = ctx.servers_map().contains_key(&server_id);
-    if !server_running {
+
+    // Atomic commit check with server lifecycle
+    if !is_running.load(Ordering::SeqCst) || !ctx.servers_map().contains_key(&server_id) {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
+        conn.close(0u32.into(), b"server stopped");
         return;
     }
+
+    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
     ctx.conns().insert(
@@ -134,26 +163,18 @@ async fn serve_incoming_in_context(
     let accept_ctx = Arc::clone(&ctx);
     let to_transport_tx_runner = to_transport_tx;
     ctx.spawn_connection_task("quic stream accept and drive", conn_id, async move {
-        match conn.accept_bi().await {
-            Ok((send, recv)) => {
-                super::connection::run_connection_with_sink(
-                    conn_id,
-                    conn,
-                    cancel_rx,
-                    send,
-                    recv,
-                    to_transport_rx,
-                    to_java_tx,
-                    to_transport_tx_runner,
-                    state,
-                    accept_ctx,
-                )
-                .await;
-            }
-            Err(_) => {
-                state.store(crate::STATE_FAILED, Ordering::SeqCst);
-                accept_ctx.emit_terminal(conn_id);
-            }
-        }
+        super::connection::run_connection_with_sink(
+            conn_id,
+            conn,
+            cancel_rx,
+            send,
+            recv,
+            to_transport_rx,
+            to_java_tx,
+            to_transport_tx_runner,
+            state,
+            accept_ctx,
+        )
+        .await;
     });
 }

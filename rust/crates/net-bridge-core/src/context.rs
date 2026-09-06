@@ -77,15 +77,20 @@ impl NativeContext {
 
     /// 分配永不复用、永不产生的 id；回绕即 context 级 fatal。
     pub fn allocate_id(&self) -> Result<u64, BridgeError> {
-        if self.next_id.load(Ordering::SeqCst) == 0 {
-            return Err(BridgeError::IdOverflow);
+        let mut curr = self.next_id.load(Ordering::SeqCst);
+        loop {
+            if curr == 0 {
+                return Err(BridgeError::IdOverflow);
+            }
+            let next = if curr == u64::MAX { 0 } else { curr + 1 };
+            match self
+                .next_id
+                .compare_exchange_weak(curr, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(allocated) => return Ok(allocated),
+                Err(actual) => curr = actual,
+            }
         }
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        if id == 0 {
-            self.next_id.store(0, Ordering::SeqCst);
-            return Err(BridgeError::IdOverflow);
-        }
-        Ok(id)
     }
 
     pub fn event_sink(&self) -> &Arc<dyn EventSink> {
@@ -228,19 +233,53 @@ impl NativeContext {
             return Ok(0);
         }
         let len = data.len();
+        if len > crate::MAX_IO_CHUNK {
+            return Err(BridgeError::Other(
+                "chunk size exceeds MAX_IO_CHUNK".to_string(),
+            ));
+        }
         let Some(handle) = self.connections.get(&conn) else {
             return Err(BridgeError::NoSuchConnection);
         };
         let writable = handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
         let write_blocked = Arc::clone(&handle.write_blocked);
+        let outbound_bytes = Arc::clone(&handle.outbound_bytes);
         let to_transport = handle.to_transport.clone();
         drop(handle);
         if !writable {
             return Ok(0);
         }
+
+        // Reserve byte budget atomically
+        let mut curr_bytes = outbound_bytes.load(Ordering::SeqCst);
+        loop {
+            if curr_bytes.saturating_add(len) > crate::DEFAULT_MAX_BUFFERED_BYTES {
+                write_blocked.store(true, Ordering::SeqCst);
+                // Double check to prevent lost-wakeup race
+                if outbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES
+                    && write_blocked.swap(false, Ordering::SeqCst)
+                {
+                    self.event_sink()
+                        .on_event(crate::event::NB_EVENT_WRITABLE, conn, 0, 0);
+                }
+                return Ok(0);
+            }
+            match outbound_bytes.compare_exchange_weak(
+                curr_bytes,
+                curr_bytes + len,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => curr_bytes = actual,
+            }
+        }
+
         match to_transport.try_send(Command::Write(data)) {
             Ok(()) => Ok(len),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Rollback byte budget
+                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
                 write_blocked.store(true, Ordering::SeqCst);
                 // Double check to prevent lost-wakeup race if consumer drained just before store
                 if to_transport.capacity() > 0 && write_blocked.swap(false, Ordering::SeqCst) {
@@ -249,7 +288,11 @@ impl NativeContext {
                 }
                 Ok(0)
             }
-            Err(_) => Err(BridgeError::ConnectionClosed),
+            Err(_) => {
+                // Rollback byte budget
+                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
+                Err(BridgeError::ConnectionClosed)
+            }
         }
     }
 
@@ -258,6 +301,7 @@ impl NativeContext {
             return Err(BridgeError::NoSuchConnection);
         };
         let to_java = handle.to_java.clone();
+        let inbound_bytes = Arc::clone(&handle.inbound_bytes);
         drop(handle);
         let mut guard = match to_java.lock() {
             Ok(g) => g,
@@ -271,11 +315,15 @@ impl NativeContext {
         };
         if first.len() > max_bytes {
             pending.push_front(first.slice(max_bytes..));
+            inbound_bytes.fetch_sub(max_bytes, Ordering::SeqCst);
             return Ok(first.slice(..max_bytes));
         }
 
         match pending.pop_front().or_else(|| rx.try_recv().ok()) {
-            None => Ok(first),
+            None => {
+                inbound_bytes.fetch_sub(first.len(), Ordering::SeqCst);
+                Ok(first)
+            }
             Some(second) => {
                 let mut out = bytes::BytesMut::with_capacity(max_bytes);
                 out.extend_from_slice(&first);
@@ -294,6 +342,8 @@ impl NativeContext {
                     }
                     out.extend_from_slice(&chunk);
                 }
+                let total_consumed = out.len();
+                inbound_bytes.fetch_sub(total_consumed, Ordering::SeqCst);
                 Ok(out.freeze())
             }
         }
@@ -307,8 +357,11 @@ impl NativeContext {
         let Some((_, handle)) = self.servers.remove(&server) else {
             return false;
         };
+        handle.is_running.store(false, Ordering::SeqCst);
         match handle.endpoint {
-            TransportEndpoint::Quic(endpoint) => endpoint.close(0u32.into(), b"net-bridge stop"),
+            TransportEndpoint::Quic(stop_tx) => {
+                let _ = stop_tx.try_send(());
+            }
             TransportEndpoint::Kcp(stop_tx) => {
                 let _ = stop_tx.try_send(());
             }
@@ -558,6 +611,45 @@ mod tests {
     }
 
     #[test]
+    fn id_overflow_concurrent_near_max_never_reuses_or_resurrects() {
+        let ctx = NativeContext::new(4, None).expect("context");
+        let start_offset = 100u64;
+        ctx.next_id.store(u64::MAX - start_offset, Ordering::SeqCst);
+        let num_threads = 8;
+        let iters_per_thread = 50;
+        let allocated_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for _ in 0..num_threads {
+            let ctx = Arc::clone(&ctx);
+            let allocated_ids = Arc::clone(&allocated_ids);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..iters_per_thread {
+                    if let Ok(id) = ctx.allocate_id() {
+                        assert_ne!(id, 0, "ID 0 绝不能被分配");
+                        allocated_ids.lock().unwrap().push(id);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let ids = allocated_ids.lock().unwrap().clone();
+        assert_eq!(ids.len(), (start_offset + 1) as usize);
+        let unique_set: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique_set.len(), ids.len(), "所有分配的 ID 必须全局唯一");
+        for expected in (u64::MAX - start_offset)..=u64::MAX {
+            assert!(
+                unique_set.contains(&expected),
+                "必须成功分配范围内的所有 ID"
+            );
+        }
+        for _ in 0..100 {
+            assert!(matches!(ctx.allocate_id(), Err(BridgeError::IdOverflow)));
+        }
+    }
+
+    #[test]
     fn panic_in_poll_cleans_up_and_emits_terminal_once() {
         let (ctx, sink) = recording_ctx();
         let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
@@ -608,6 +700,78 @@ mod tests {
         assert_eq!(sink.0.lock().unwrap().len(), events, "终态事件必须恰好一次");
         ctx.close_connection(7);
         assert_eq!(ctx.connection_state(7), None);
+    }
+
+    #[test]
+    fn byte_budget_limits_outbound_and_releases_properly() {
+        let (ctx, sink) = recording_ctx();
+        let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
+        let (to_transport_tx, mut to_transport_rx) = tokio::sync::mpsc::channel::<Command>(4096);
+        let (_to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Bytes>(8192);
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+
+        ctx.conns().insert(
+            42,
+            ConnHandle::new(
+                state.clone(),
+                to_java_rx,
+                to_transport_tx,
+                cancel_tx,
+                None,
+                None,
+                false,
+                None,
+            ),
+        );
+
+        let chunk = Bytes::copy_from_slice(&vec![0xAAu8; crate::MAX_IO_CHUNK]); // 64 KiB
+        let total_chunks = crate::DEFAULT_MAX_BUFFERED_BYTES / crate::MAX_IO_CHUNK; // 64 chunks = 4 MiB
+
+        for i in 0..total_chunks {
+            let res = ctx.write_chunk(42, chunk.clone()).expect("write ok");
+            assert_eq!(res, crate::MAX_IO_CHUNK, "chunk {i} should be accepted");
+        }
+
+        // Now byte budget is exhausted (4 MiB buffered)
+        let over_res = ctx.write_chunk(42, chunk.clone()).expect("would block");
+        assert_eq!(
+            over_res, 0,
+            "exceeding byte budget must return 0 / would_block"
+        );
+
+        // Drain one chunk from to_transport_rx
+        let cmd = to_transport_rx.try_recv().expect("cmd");
+        if let Command::Write(b) = cmd {
+            let conn = ctx.conns().get(&42).unwrap();
+            conn.outbound_bytes.fetch_sub(b.len(), Ordering::SeqCst);
+            if conn.write_blocked.swap(false, Ordering::SeqCst) {
+                ctx.event_sink()
+                    .on_event(crate::event::NB_EVENT_WRITABLE, 42, 0, 0);
+            }
+        }
+
+        // Verify WRITABLE event is fired
+        let writable_events: Vec<_> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, o, _, _)| *k == crate::event::NB_EVENT_WRITABLE && *o == 42)
+            .cloned()
+            .collect();
+        assert_eq!(
+            writable_events.len(),
+            1,
+            "WRITABLE event must be emitted on edge"
+        );
+
+        // Now we can write one more chunk
+        let next_res = ctx
+            .write_chunk(42, chunk.clone())
+            .expect("write ok after drain");
+        assert_eq!(next_res, crate::MAX_IO_CHUNK);
+
+        ctx.close_connection(42);
     }
 
     #[test]

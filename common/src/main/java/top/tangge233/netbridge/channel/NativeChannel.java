@@ -458,10 +458,6 @@ public class NativeChannel extends AbstractChannel {
                 @Nullable SocketAddress localAddress,
                 ChannelPromise promise
         ) {
-            if (!promise.setUncancellable()) {
-                return;
-            }
-
             if (!isOpen()) {
                 promise.tryFailure(new ClosedChannelException());
                 return;

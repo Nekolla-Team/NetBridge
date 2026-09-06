@@ -70,6 +70,70 @@ class ConnectionExecutorTest {
     }
 
     @Test
+    void delegatingChannelFutureCancellationCascadesAndPreventsRetries() throws Exception {
+        var successCache = new SuccessfulEndpointCache();
+        var store = new ConnectionStateStore();
+        var executor = new ConnectionExecutor(
+                successCache,
+                store,
+                new NativeRetryPolicy(
+                        3,
+                        5000L,
+                        5000L
+                )
+        );
+        var adapter = adapter(group);
+        var backend = new UnresponsiveTestBackend();
+        var plan = planWithNative(new InetSocketAddress(
+                InetAddress.getLoopbackAddress(),
+                25565
+        ));
+        var future = executor.execute(
+                plan,
+                backend,
+                adapter
+        );
+        assertTrue(future.cancel(true));
+        assertTrue(future.isCancelled());
+        assertTrue(future.isDone());
+
+        // Wait a bit to ensure no fallback or retries occur
+        Thread.sleep(100);
+        assertEquals(
+                0,
+                adapter.openTcpCount.get(),
+                "Cancelled future must not trigger TCP fallback"
+        );
+    }
+
+    private static ConnectionPlan planWithNative(InetSocketAddress endpoint) {
+        return ConnectionPlan.withNativeAttempt(
+                new InetSocketAddress("203.0.113.9", 25565),
+                new ConnectionPlan.NativeAttemptPlan(
+                        TransportMode.QUIC,
+                        endpoint,
+                        KcpProfile.BALANCE
+                )
+        );
+    }
+
+    @Test
+    void delegatingChannelFutureListenersExactlyOnceOnTerminal() {
+        var dcf = new DelegatingChannelFuture(group);
+        var count = new AtomicInteger(0);
+        dcf.addListener(_ -> count.incrementAndGet());
+
+        var embedded = new EmbeddedChannel();
+        var inner = embedded.newSucceededFuture();
+        dcf.setDelegate(inner, true);
+
+        // Add another listener after completion
+        dcf.addListener(_ -> count.incrementAndGet());
+
+        assertEquals(2, count.get(), "Listeners must be invoked exactly once each");
+    }
+
+    @Test
     void nativeUnavailableFallsBackToTcp() {
         var store = new ConnectionStateStore();
         var executor = new ConnectionExecutor(
@@ -91,17 +155,6 @@ class ConnectionExecutorTest {
         assertEquals(
                 1,
                 adapter.openTcpCount.get()
-        );
-    }
-
-    private static ConnectionPlan planWithNative(InetSocketAddress endpoint) {
-        return ConnectionPlan.withNativeAttempt(
-                new InetSocketAddress("203.0.113.9", 25565),
-                new ConnectionPlan.NativeAttemptPlan(
-                        TransportMode.QUIC,
-                        endpoint,
-                        KcpProfile.BALANCE
-                )
         );
     }
 
@@ -188,6 +241,29 @@ class ConnectionExecutorTest {
         }
     }
 
+    private static final class UnresponsiveTestBackend implements NativeTransportBackend {
+
+        @Override
+        public NativeBackendAvailability availability() {
+            return new NativeBackendAvailability(NativeBackendState.AVAILABLE, null);
+        }
+
+        @Override
+        public NativeConnection connect(NativeConnectRequest request) {
+            return new AsyncTestConnection(request, 1);
+        }
+
+        @Override
+        public NativeServer startServer(NativeServerRequest request) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+        }
+
+    }
+
     private static final class AsyncTestBackend implements NativeTransportBackend {
 
         private final EventLoopGroup group;
@@ -208,7 +284,7 @@ class ConnectionExecutorTest {
                     request,
                     ids.getAndIncrement()
             );
-            group.next().schedule(
+            var unused = group.next().schedule(
                     conn::complete,
                     25,
                     TimeUnit.MILLISECONDS

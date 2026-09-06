@@ -4,6 +4,10 @@ import top.tangge233.netbridge.nativebridge.NativeConnection;
 
 public interface NativeConnectionAdopter {
 
-    void adopt(NativeConnection connection);
+    default void adopt(NativeConnection connection) {
+        adopt(connection, 0L);
+    }
+
+    void adopt(NativeConnection connection, long sessionGeneration);
 
 }

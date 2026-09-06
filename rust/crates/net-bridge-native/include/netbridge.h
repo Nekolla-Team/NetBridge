@@ -60,6 +60,13 @@ typedef struct nb_context nb_context_t;
 #define NB_EVENT_ACCEPTED         4
 #define NB_EVENT_SERVER_STATE     5
 
+/* === Feature Bits === */
+#define NB_FEATURE_QUIC                  (1ULL << 0)
+#define NB_FEATURE_KCP                   (1ULL << 1)
+#define NB_FEATURE_WRITABLE_EVENT        (1ULL << 2)
+#define NB_FEATURE_BINARY_SOCKET_ADDRESS (1ULL << 3)
+#define NB_FEATURE_SERVER_STATE_EVENT    (1ULL << 4)
+
 /* === Struct Definitions === */
 
 typedef struct nb_bytes_view_v1 {

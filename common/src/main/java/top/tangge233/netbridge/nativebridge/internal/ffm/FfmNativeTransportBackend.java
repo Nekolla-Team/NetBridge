@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class FfmNativeTransportBackend
         implements NativeTransportBackend, NativeEventListener {
@@ -19,7 +18,6 @@ public final class FfmNativeTransportBackend
     private final Map<Long, FfmNativeServer> servers = new ConcurrentHashMap<>();
     private final Map<Long, List<Long>> pendingAccepted = new ConcurrentHashMap<>();
     private final Map<Long, NativeConnectionState> pendingConnectionStates = new ConcurrentHashMap<>();
-    private final AtomicBoolean closeOnce = new AtomicBoolean(false);
 
     private volatile NativeBackendState state = NativeBackendState.NEW;
 
@@ -88,14 +86,23 @@ public final class FfmNativeTransportBackend
                 request.port(),
                 request.kcpProfile().abiValue()
         );
+        var earlyState = pendingConnectionStates.remove(connId);
+        var initialState = earlyState != null
+                ? earlyState
+                : NativeConnectionState.CONNECTING;
         var conn = new FfmNativeConnection(
                 this,
                 connId,
                 null,
                 kind,
-                NativeConnectionState.CONNECTING
+                initialState
         );
         connections.put(connId, conn);
+        // Double check if an event arrived concurrently during instantiation
+        var racedState = pendingConnectionStates.remove(connId);
+        if (racedState != null) {
+            conn.handleStateChanged(racedState);
+        }
         return conn;
     }
 
@@ -138,8 +145,8 @@ public final class FfmNativeTransportBackend
     }
 
     @Override
-    public void close() {
-        if (!closeOnce.compareAndSet(false, true)) {
+    public synchronized void close() {
+        if (state == NativeBackendState.CLOSED) {
             return;
         }
 
@@ -175,9 +182,16 @@ public final class FfmNativeTransportBackend
 
             connections.clear();
             context.close();
-        } finally {
             library.close();
             state = NativeBackendState.CLOSED;
+        } catch (Throwable t) {
+            state = NativeBackendState.AVAILABLE;
+            context.dispatcher().addListener(this);
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+
+            throw new NativeException("failed to close native transport backend", t);
         }
     }
 
@@ -228,14 +242,22 @@ public final class FfmNativeTransportBackend
                 case NativeEvent.KIND_ACCEPTED -> {
                     var server = servers.get(event.objectId());
                     if (server != null) {
+                        var earlyState = pendingConnectionStates.remove(event.arg0());
+                        var initialState = earlyState != null
+                                ? earlyState
+                                : NativeConnectionState.CONNECTED;
                         var accepted = new FfmNativeConnection(
                                 this,
                                 event.arg0(),
                                 server,
                                 server.transport(),
-                                NativeConnectionState.CONNECTED
+                                initialState
                         );
                         connections.put(event.arg0(), accepted);
+                        var racedState = pendingConnectionStates.remove(event.arg0());
+                        if (racedState != null) {
+                            accepted.handleStateChanged(racedState);
+                        }
                         server.handleAccepted(accepted);
                     } else {
                         pendingAccepted
@@ -249,7 +271,13 @@ public final class FfmNativeTransportBackend
                 case NativeEvent.KIND_SERVER_STATE -> {
                     var server = servers.get(event.objectId());
                     if (server != null) {
-                        server.handleStateChanged();
+                        var st = switch ((int) event.arg0()) {
+                            case 1 -> NativeServerState.RUNNING;
+                            case 2 -> NativeServerState.STOPPED;
+                            case 3 -> NativeServerState.FAILED;
+                            default -> NativeServerState.RUNNING;
+                        };
+                        server.handleStateChanged(st);
                     }
                 }
                 default -> {

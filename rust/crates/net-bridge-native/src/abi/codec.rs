@@ -15,6 +15,9 @@ use net_bridge_core::transport::kcp::config::KcpProfile;
 ///
 /// 当 `view.length > 0` 时，`view.data` 必须指向至少 `view.length` 字节的有效已初始化内存。
 pub unsafe fn bytes_view_to_str<'a>(view: &NbBytesViewV1) -> Result<&'a str, NbStatus> {
+    if view.reserved0 != 0 {
+        return Err(NB_INVALID_ARGUMENT);
+    }
     if view.length == 0 {
         return Ok("");
     }

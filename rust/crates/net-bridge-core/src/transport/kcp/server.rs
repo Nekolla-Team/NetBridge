@@ -71,7 +71,7 @@ async fn server_task_in_context(
     stop_tx: mpsc::Sender<()>,
     mut stop_rx: mpsc::Receiver<()>,
 ) {
-    let (mut listener, local) = match bind_listener(port, bind, max_connections, &config).await {
+    let (listener, local) = match bind_listener(port, bind, max_connections, &config).await {
         Ok(pair) => pair,
         Err(msg) => {
             let _ = tx.send(Err(msg));
@@ -79,6 +79,7 @@ async fn server_task_in_context(
         }
     };
     let conn_count = Arc::new(AtomicUsize::new(0));
+    let is_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     ctx.servers_map().insert(
         server_id,
         ServerHandle {
@@ -86,6 +87,7 @@ async fn server_task_in_context(
             port: local.port(),
             max_connections,
             conn_count: Arc::clone(&conn_count),
+            is_running: Arc::clone(&is_running),
         },
     );
     let _ = tx.send(Ok(local.port()));
@@ -93,24 +95,24 @@ async fn server_task_in_context(
     let ctx_clone = Arc::clone(&ctx);
     accept_loop_in_context(
         ctx_clone,
-        &mut listener,
+        listener,
         &mut stop_rx,
         server_id,
         max_connections,
         conn_count,
+        is_running,
     )
     .await;
-    drop(listener);
-    let _ = ctx.stop_server(server_id);
 }
 
 async fn accept_loop_in_context(
     ctx: Arc<crate::context::NativeContext>,
-    listener: &mut KcpUdpStream,
+    mut listener: KcpUdpStream,
     stop_rx: &mut mpsc::Receiver<()>,
     server_id: u64,
     max_connections: usize,
     conn_count: Arc<AtomicUsize>,
+    is_running: Arc<std::sync::atomic::AtomicBool>,
 ) {
     loop {
         let accepted = tokio::select! {
@@ -138,8 +140,9 @@ async fn accept_loop_in_context(
         let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
         let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        if !ctx.servers_map().contains_key(&server_id) {
+        if !is_running.load(Ordering::SeqCst) || !ctx.servers_map().contains_key(&server_id) {
             conn_count.fetch_sub(1, Ordering::Relaxed);
+            let _ = session.close().await;
             continue;
         };
         ctx.conns().insert(
@@ -179,6 +182,8 @@ async fn accept_loop_in_context(
             ),
         );
     }
+    // Keep listener alive in background until context shutdown so active sessions continue receiving packets!
+    while listener.accept().await.is_ok() {}
 }
 
 async fn bind_listener(

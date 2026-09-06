@@ -112,7 +112,7 @@ class ServerRuntimeTest {
                 var backend = fakeBackend();
                 var runtime = new ServerRuntime(backend, store(dir))
         ) {
-            runtime.setAdopter(connection -> {
+            runtime.setAdopter((connection, _) -> {
                 adopted.set(connection);
                 latch.countDown();
             });
@@ -138,13 +138,15 @@ class ServerRuntimeTest {
         var runtime = new ServerRuntime(backend, store(dir));
         var _ = new CountDownLatch(1);
         var adopted = new AtomicReference<@Nullable NativeConnection>();
-        runtime.setAdopter(connection -> {
+        runtime.setAdopter((connection, _) -> {
             adopted.set(connection);
             throw new RuntimeException("adopt failed");
         });
         assertTrue(runtime.start(25565, null));
 
-        var client = backend.connect(NativeConnectRequest.quic("127.0.0.1", 25565));
+        var client = backend.connect(
+                NativeConnectRequest.quic("127.0.0.1", 25565)
+        );
         var deadline = System.currentTimeMillis() + 3000;
         while (adopted.get() == null && System.currentTimeMillis() < deadline) {
             Thread.sleep(10);
