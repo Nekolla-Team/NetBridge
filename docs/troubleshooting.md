@@ -7,17 +7,17 @@
 
 日志特征：`net-bridge native unavailable; accelerated transports disabled (TCP fallback)`。
 
-| 原因                     | 诊断与处置                                                                                                                            |
-|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
-| 不支持的平台/架构        | `native/<os>-<arch>/` 目录无匹配资源。确认平台在支持列表（linux/windows x86_64、linux/macos aarch64）；arm64 Windows 暂不支持。       |
-| native resource missing  | jar 内缺 `native/<platform>/<lib>`——重装/重新下载完整 mod jar。                                                                       |
-| checksum mismatch        | `manifest.json` 的 sha256 与实际库不一致（jar 损坏或被改动）。重新下载。                                                              |
-| native access denied     | 未加 JVM 参数 `--enable-native-access=ALL-UNNAMED`（Java 25 下被拒绝访问的 restricted method 会直接失败）。按 README 的启动参数补齐。 |
-| load failed              | 库文件存在但 OS 拒绝映射（权限/缺依赖）。检查文件权限与系统库。                                                                       |
-| missing bootstrap symbol | 库内无 `netbridge_get_api`——版本错配或文件损坏，重装。                                                                                |
-| ABI incompatible         | `netbridge_get_api` 版本协商失败：mod jar 与 native 库不是同一次构建产物，整体更新。                                                  |
-| API table invalid        | 函数表 struct_size/必需函数指针校验失败——同样按 ABI 不兼容处理。                                                                      |
-| context create failed    | Rust `NativeContext`/tokio runtime 创建失败（资源极端受限）。检查内存/线程数限制。                                                    |
+| 原因                     | 诊断与处置                                                                                                                                    |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| 不支持的平台/架构        | `native/<os>-<arch>/` 目录无匹配资源。确认平台在支持列表（linux/windows x86_64、linux/macos aarch64、macos x86_64）；arm64 Windows 暂不支持。 |
+| native resource missing  | jar 内缺 `native/<platform>/<lib>`——重装/重新下载完整 mod jar。                                                                               |
+| checksum mismatch        | `manifest.json` 的 sha256 与实际库不一致（jar 损坏或被改动）。重新下载。                                                                      |
+| native access denied     | 未加 JVM 参数 `--enable-native-access=ALL-UNNAMED`（Java 25 下被拒绝访问的 restricted method 会直接失败）。按 README 的启动参数补齐。         |
+| load failed              | 库文件存在但 OS 拒绝映射（权限/缺依赖）。检查文件权限与系统库。                                                                               |
+| missing bootstrap symbol | 库内无 `netbridge_get_api`——版本错配或文件损坏，重装。                                                                                        |
+| ABI incompatible         | `netbridge_get_api` 版本协商失败：mod jar 与 native 库不是同一次构建产物，整体更新。                                                          |
+| API table invalid        | 函数表 struct_size/必需函数指针校验失败——同样按 ABI 不兼容处理。                                                                              |
+| context create failed    | Rust `NativeContext`/tokio runtime 创建失败（资源极端受限）。检查内存/线程数限制。                                                            |
 
 ## 服务端启动
 

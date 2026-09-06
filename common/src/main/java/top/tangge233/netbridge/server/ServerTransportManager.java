@@ -7,10 +7,12 @@ import top.tangge233.netbridge.ability.TransportProtocol;
 import top.tangge233.netbridge.config.server.ServerSettings;
 import top.tangge233.netbridge.config.server.ServerSettingsResolver;
 import top.tangge233.netbridge.nativebridge.*;
+import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
 import top.tangge233.netbridge.transport.KcpProfile;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import org.jspecify.annotations.Nullable;
@@ -26,6 +28,7 @@ public final class ServerTransportManager {
     private @Nullable NativeServer quic;
     private @Nullable NativeServer kcp;
     private @Nullable NetworksAbility announcement;
+    private volatile boolean starting;
     private volatile boolean closed;
 
     public ServerTransportManager(
@@ -65,47 +68,52 @@ public final class ServerTransportManager {
             return quic != null || kcp != null;
         }
 
-        var resolved = ServerSettingsResolver.resolve(settings, mcPort, mcBindIp);
-
-        var entries = new LinkedHashMap<String, NetworksEntry>();
-        var started = new ArrayList<NativeServer>();
+        starting = true;
         try {
-            var q = startTransport("quic", resolved.quic());
-            quic = q;
-            if (q != null) {
-                started.add(q);
-            }
-            collectAnnouncement(entries, "quic", resolved.quic(), q);
+            var resolved = ServerSettingsResolver.resolve(settings, mcPort, mcBindIp);
 
-            var k = startTransport("kcp", resolved.kcp());
-            kcp = k;
-            if (k != null) {
-                started.add(k);
-            }
-            collectAnnouncement(entries, "kcp", resolved.kcp(), k);
-        } catch (RuntimeException e) {
-            started.forEach(s -> {
-                try {
-                    s.close();
-                } catch (RuntimeException ce) {
-                    NetBridge.LOGGER.warn(
-                            "Error closing transport after failed start: {}",
-                            ce.getMessage()
-                    );
+            var entries = new LinkedHashMap<String, NetworksEntry>();
+            var started = new ArrayList<NativeServer>();
+            try {
+                var q = startTransport("quic", resolved.quic());
+                quic = q;
+                if (q != null) {
+                    started.add(q);
                 }
-            });
-            quic = null;
-            kcp = null;
-            NetBridge.LOGGER.error("Server transport start failed: {}", e.getMessage());
-            return false;
-        }
+                collectAnnouncement(entries, "quic", resolved.quic(), q);
 
-        announcement = NetworksAbility.of(entries.values().toArray(new NetworksEntry[0]));
-        var any = quic != null || kcp != null;
-        if (!any) {
-            NetBridge.LOGGER.warn("No accelerated transport started; only TCP will be served");
+                var k = startTransport("kcp", resolved.kcp());
+                kcp = k;
+                if (k != null) {
+                    started.add(k);
+                }
+                collectAnnouncement(entries, "kcp", resolved.kcp(), k);
+            } catch (RuntimeException e) {
+                started.forEach(s -> {
+                    try {
+                        s.close();
+                    } catch (RuntimeException ce) {
+                        NetBridge.LOGGER.warn(
+                                "Error closing transport after failed start: {}",
+                                ce.getMessage()
+                        );
+                    }
+                });
+                quic = null;
+                kcp = null;
+                NetBridge.LOGGER.error("Server transport start failed: {}", e.getMessage());
+                return false;
+            }
+
+            announcement = NetworksAbility.of(entries.values().toArray(new NetworksEntry[0]));
+            var any = quic != null || kcp != null;
+            if (!any) {
+                NetBridge.LOGGER.warn("No accelerated transport started; only TCP will be served");
+            }
+            return any;
+        } finally {
+            starting = false;
         }
-        return any;
     }
 
     private @Nullable NativeServer startTransport(
@@ -248,27 +256,39 @@ public final class ServerTransportManager {
             return;
         }
 
-        closed = true;
+        List<Throwable> errors = new ArrayList<>();
         announcement = null;
 
         if (quic != null) {
             try {
                 quic.close();
-            } catch (RuntimeException e) {
+                quic = null;
+            } catch (Throwable e) {
                 NetBridge.LOGGER.warn("Error stopping quic acceptor: {}", e.getMessage());
+                errors.add(e);
             }
-            quic = null;
         }
 
         if (kcp != null) {
             try {
                 kcp.close();
-            } catch (RuntimeException e) {
+                kcp = null;
+            } catch (Throwable e) {
                 NetBridge.LOGGER.warn("Error stopping kcp acceptor: {}", e.getMessage());
+                errors.add(e);
             }
-            kcp = null;
         }
 
+        if (!errors.isEmpty()) {
+            var primary = new NativeResourceException(
+                    "Failed to close all server transports cleanly");
+            for (var err : errors) {
+                primary.addSuppressed(err);
+            }
+            throw primary;
+        }
+
+        closed = true;
         NetBridge.LOGGER.info("Server transport manager stopped");
     }
 
@@ -285,7 +305,7 @@ public final class ServerTransportManager {
 
     public synchronized boolean isSessionValid(long generation) {
         return !closed
-                && isRunning()
+                && (starting || isRunning())
                 && this.sessionGeneration == generation;
     }
 

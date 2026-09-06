@@ -58,7 +58,7 @@ pub fn start_server_in_context(
     let accept_stopped = Arc::clone(&stopped_pair);
     ctx.servers_map().insert(
         server_id,
-        ServerHandle {
+        Arc::new(ServerHandle {
             endpoint: TransportEndpoint::Quic(stop_tx),
             port: actual_port,
             max_connections,
@@ -66,14 +66,9 @@ pub fn start_server_in_context(
             state,
             commit_lock,
             stopped_pair,
-        },
+        }),
     );
-    ctx.event_sink().on_event(
-        crate::event::NB_EVENT_SERVER_STATE,
-        server_id,
-        crate::event::NB_SERVER_STATE_RUNNING as i64,
-        0,
-    );
+    ctx.emit_server_state(server_id, crate::SERVER_STATE_RUNNING);
 
     let ctx_clone = Arc::clone(ctx);
     ctx.spawn_server_task("quic accept loop in context", server_id, async move {
@@ -165,7 +160,7 @@ async fn serve_incoming_in_context(
     );
 
     // Linearized commit check with server lifecycle
-    if !ctx.try_commit_accept(server_id, conn_id, handle) {
+    if !ctx.try_commit_accept(server_id, conn_id, Arc::new(handle)) {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
         conn.close(0u32.into(), b"server stopped");
         return;

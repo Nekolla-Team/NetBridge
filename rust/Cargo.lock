@@ -500,6 +500,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "fec",
+ "futures-util",
  "kcp-rs",
  "quinn",
  "quinn-plaintext",

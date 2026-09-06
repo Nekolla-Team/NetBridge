@@ -35,6 +35,6 @@ pub fn map_error(err: BridgeError) -> NbStatus {
         BridgeError::Cancelled => NB_CLOSED,
         BridgeError::Internal(_) => NB_INTERNAL,
         BridgeError::IdOverflow => NB_INTERNAL,
-        BridgeError::Other(_) => NB_INTERNAL,
+        BridgeError::InvalidArgument(_) => NB_INVALID_ARGUMENT,
     }
 }

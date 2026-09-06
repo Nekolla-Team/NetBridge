@@ -25,11 +25,9 @@ jobs:
           java-version: '25'
 
       - uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.7.1'
 
       - name: Run pure Java tests
-        run: gradle test -PskipNativeBuild
+        run: ./gradlew test -PskipNativeBuild
 
   rust-unit:
     name: Rust unit tests / clippy / fmt
@@ -69,8 +67,6 @@ jobs:
           java-version: '25'
 
       - uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.7.1'
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -93,10 +89,10 @@ jobs:
           echo "exported business symbols: $symbols"
 
       - name: Verify native header / ABI constants
-        run: gradle verifyArchitecture -PskipNativeBuild
+        run: ./gradlew verifyArchitecture -PskipNativeBuild
 
       - name: Run FFM bootstrap + integration tests (--illegal-native-access=deny)
-        run: gradle :common:nativeIntegrationTest -PnativeProfile=release
+        run: ./gradlew :common:nativeIntegrationTest -PnativeProfile=release
 
   native:
     name: native (${{ matrix.dir }})
@@ -114,6 +110,9 @@ jobs:
             lib: libnet_bridge_native.so
           - os: macos-latest
             dir: macos-aarch64
+            lib: libnet_bridge_native.dylib
+          - os: macos-13
+            dir: macos-x86_64
             lib: libnet_bridge_native.dylib
           - os: windows-latest
             dir: windows-x86_64
@@ -155,8 +154,6 @@ jobs:
           java-version: '25'
 
       - uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.7.1'
 
       - name: Download all native libraries
         uses: actions/download-artifact@v8
@@ -166,7 +163,7 @@ jobs:
           merge-multiple: true
 
       - name: Assemble mod jars (includes manifest + architecture guards)
-        run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild "-PmodVersion=${GITHUB_REF_NAME#v}"
+        run: ./gradlew build assembleAll -PnativeProfile=release -PskipNativeBuild "-PmodVersion=${GITHUB_REF_NAME#v}"
 
       - name: Upload mod jars
         uses: actions/upload-artifact@v7

@@ -72,9 +72,9 @@ public final class NetBridgeServices {
 
     public static synchronized void resetForTest() {
         var existing = runtime;
-        runtime = null;
         if (existing != null) {
             existing.close();
+            runtime = null;
         }
     }
 

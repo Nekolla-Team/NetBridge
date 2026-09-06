@@ -88,6 +88,10 @@ public final class ConnectionExecutor {
             ConnectionExecutorAdapter adapter,
             DelegatingChannelFuture result
     ) {
+        if (result.isCancelled()) {
+            return;
+        }
+
         var attemptOpt = plan.nativeAttempt();
         if (backend == null || attemptOpt.isEmpty()) {
             fallbackToTcp(plan, adapter, result);
@@ -112,7 +116,7 @@ public final class ConnectionExecutor {
             int attemptNumber,
             DelegatingChannelFuture result
     ) {
-        if (result.isAttemptCancelled()) {
+        if (result.isCancelled()) {
             return;
         }
 
@@ -140,7 +144,10 @@ public final class ConnectionExecutor {
             return;
         }
 
-        result.onAttemptStarted(attemptFuture.channel(), attemptFuture);
+        if (!result.registerAttempt(attemptFuture.channel(), attemptFuture)) {
+            return;
+        }
+
         attemptFuture.addListener(f -> {
             if (f.isSuccess()) {
                 stateStore.connected(
@@ -196,7 +203,7 @@ public final class ConnectionExecutor {
             closeQuietly(failedChannel);
         }
 
-        if (result.isAttemptCancelled()) {
+        if (result.isCancelled()) {
             return;
         }
 
@@ -258,33 +265,47 @@ public final class ConnectionExecutor {
             DelegatingChannelFuture result
     ) {
         var connection = backend.connect(buildRequest(attempt));
-        var channel = new NativeChannel(connection);
-        var bootstrap = new Bootstrap()
-                .group(adapter.eventLoopGroup())
-                .channelFactory(() -> channel)
-                .handler(new ChannelInitializer<>() {
-                    @Override
-                    protected void initChannel(Channel ch) {
-                        adapter.initNativeChannel(ch);
-                    }
-                });
-        var future = bootstrap.connect(attempt.endpoint());
-        var watchdog = future.channel().eventLoop().schedule(
-                () -> {
-                    if (!future.isDone()) {
-                        channel.abortConnect(new ConnectException(
-                                "handshake timeout after %d ms".formatted(
-                                        retryPolicy.timeoutMillisForAttempt(attemptNumber)
-                                )
-                        ));
-                    }
-                },
-                retryPolicy.timeoutMillisForAttempt(attemptNumber),
-                TimeUnit.MILLISECONDS
-        );
-        result.registerScheduledTask(watchdog);
-        future.addListener(_ -> watchdog.cancel(false));
-        return future;
+        NativeChannel channel = null;
+        try {
+            channel = new NativeChannel(connection);
+            final var finalChannel = channel;
+            var bootstrap = new Bootstrap()
+                    .group(adapter.eventLoopGroup())
+                    .channelFactory(() -> finalChannel)
+                    .handler(new ChannelInitializer<>() {
+                        @Override
+                        protected void initChannel(Channel ch) {
+                            adapter.initNativeChannel(ch);
+                        }
+                    });
+            var future = bootstrap.connect(attempt.endpoint());
+            var timeoutMillis = retryPolicy.timeoutMillisForAttempt(attemptNumber);
+            var watchdog = future.channel().eventLoop().schedule(
+                    () -> {
+                        if (!future.isDone()) {
+                            finalChannel.abortConnect(new ConnectException(
+                                    "handshake timeout after %d ms".formatted(timeoutMillis)
+                            ));
+                        }
+                    },
+                    timeoutMillis,
+                    TimeUnit.MILLISECONDS
+            );
+            result.registerScheduledTask(watchdog);
+            future.addListener(_ -> watchdog.cancel(false));
+            return future;
+        } catch (Throwable t) {
+            if (channel != null) {
+                closeQuietly(channel);
+            } else {
+                try {
+                    connection.close();
+                } catch (Throwable _) {
+                    // ignore
+                }
+            }
+            throw t;
+        }
     }
 
     private void fallbackToTcp(
@@ -292,13 +313,25 @@ public final class ConnectionExecutor {
             ConnectionExecutorAdapter adapter,
             DelegatingChannelFuture result
     ) {
-        if (result.isAttemptCancelled()) {
+        if (result.isCancelled()) {
             return;
         }
 
         stateStore.fallingBack();
-        var tcp = adapter.openTcp(plan.tcpAddress());
-        result.onAttemptStarted(tcp.channel(), tcp);
+        ChannelFuture tcp;
+        try {
+            tcp = adapter.openTcp(plan.tcpAddress());
+        } catch (Throwable t) {
+            stateStore.idle();
+            result.completeFailure(t, null);
+            return;
+        }
+
+        if (!result.registerAttempt(tcp.channel(), tcp)) {
+            stateStore.idle();
+            return;
+        }
+
         tcp.addListener(f -> {
             stateStore.idle();
             if (f.isSuccess()) {

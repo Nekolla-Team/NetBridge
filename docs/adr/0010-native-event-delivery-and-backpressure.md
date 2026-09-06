@@ -49,6 +49,7 @@ FFM cutover（ADR-0009）后，Rust 侧 upcall 回调可以低开销地到达 Ja
 
 ## 增补（最终审计定稿）
 
+- **事件提交与外发解耦（INV-4）**：Rust 事件处理在持锁期间仅做状态校验与不可变事件描述符构造，释放所有锁（Mutex、commit_lock、DashMap guard）后方触发 FFI sink；Java listener 同样在释放内部 monitor 后调用，彻底消除 FFI 与用户代码重入死锁。
 - **async panic guard 与任务监督**：任务统一经
   `NativeContext::spawn_connection_task / spawn_server_task` 托管到 context 级 JoinHandle 集合；panic
   捕获后触发对应连接/服务端终态清理；QUIC reader 与 KCP reader 均作为受控子任务管理，在连接关闭时显式中止与回收。

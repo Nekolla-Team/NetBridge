@@ -18,7 +18,7 @@ public final class FfmNativeConnection implements NativeConnection {
     private volatile NativeConnectionState state;
     private volatile NativeFailureReason failureReason = NativeFailureReason.GENERIC;
     private volatile @Nullable NativeConnectionListener listener;
-    private volatile boolean closed;
+    private volatile LifecycleState lifecycle = LifecycleState.OPEN;
 
     FfmNativeConnection(
             FfmNativeTransportBackend owner,
@@ -47,7 +47,7 @@ public final class FfmNativeConnection implements NativeConnection {
     @Override
     public NativeConnectionState state() {
         var st = state;
-        if (closed) {
+        if (lifecycle == LifecycleState.CLOSED) {
             return NativeConnectionState.CLOSED;
         }
 
@@ -193,41 +193,79 @@ public final class FfmNativeConnection implements NativeConnection {
     }
 
     @Override
-    public synchronized void setListener(NativeConnectionListener listener) {
-        this.listener = listener;
-        var st = state();
+    public void setListener(NativeConnectionListener listener) {
+        NativeConnectionState st;
+        NativeFailureReason reason;
+        synchronized (this) {
+            this.listener = listener;
+            st = state();
+            reason = failureReason;
+        }
+
         if (st != NativeConnectionState.CONNECTING) {
-            listener.onStateChanged(st, failureReason);
+            listener.onStateChanged(st, reason);
         }
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
-            return;
+    public void close() {
+        synchronized (this) {
+            if (lifecycle == LifecycleState.CLOSED) {
+                return;
+            }
+            lifecycle = LifecycleState.CLOSING;
         }
-
-        closed = true;
-        listener = null;
 
         try {
             owner.context().connectionClose(id);
-        } catch (RuntimeException e) {
-            throw new NativeException("failed to close native connection " + id, e);
-        } finally {
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSED;
+                state = NativeConnectionState.CLOSED;
+                listener = null;
+            }
             owner.unregisterConnection(id);
             releaseServerOwnership();
+        } catch (Throwable t) {
+            if (t instanceof NativeException ne
+                    && ne.statusCode() == FfmStatus.NB_NOT_FOUND
+            ) {
+                synchronized (this) {
+                    lifecycle = LifecycleState.CLOSED;
+                    state = NativeConnectionState.CLOSED;
+                    listener = null;
+                }
+                owner.unregisterConnection(id);
+                releaseServerOwnership();
+                return;
+            }
+
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSE_FAILED;
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new NativeException("failed to close native connection " + id, t);
         }
     }
 
     private void markClosedByQuery() {
-        var prev = state;
-        state = NativeConnectionState.CLOSED;
+        NativeConnectionListener l;
+        NativeConnectionState prev;
+        NativeFailureReason reason;
+        synchronized (this) {
+            prev = state;
+            state = NativeConnectionState.CLOSED;
+            lifecycle = LifecycleState.CLOSED;
+            l = listener;
+            reason = failureReason;
+        }
         owner.unregisterConnection(id);
         releaseServerOwnership();
-        var l = listener;
-        if (l != null && prev != NativeConnectionState.CLOSED) {
-            l.onStateChanged(NativeConnectionState.CLOSED, failureReason);
+        if (l != null
+                && prev != NativeConnectionState.CLOSED
+        ) {
+            l.onStateChanged(NativeConnectionState.CLOSED, reason);
         }
     }
 
@@ -238,13 +276,17 @@ public final class FfmNativeConnection implements NativeConnection {
     }
 
     private void ensureOpen() {
-        if (closed) {
+        if (lifecycle == LifecycleState.CLOSED) {
             throw new NativeException("NativeConnection " + id + " is closed");
         }
     }
 
     public NativeFailureReason failureReason() {
         return failureReason;
+    }
+
+    public LifecycleState lifecycle() {
+        return lifecycle;
     }
 
     void handleStateChanged(NativeConnectionState newState) {
@@ -255,14 +297,18 @@ public final class FfmNativeConnection implements NativeConnection {
             NativeConnectionState newState,
             NativeFailureReason reason
     ) {
-        this.failureReason = reason;
-        var prev = state;
-        if (prev == newState) {
-            return;
+        NativeConnectionListener l;
+        synchronized (this) {
+            var prev = state;
+            if (prev == newState) {
+                return;
+            }
+
+            this.failureReason = reason;
+            this.state = newState;
+            l = listener;
         }
 
-        state = newState;
-        var l = listener;
         if (l != null) {
             l.onStateChanged(newState, reason);
         }
@@ -270,6 +316,9 @@ public final class FfmNativeConnection implements NativeConnection {
         if (newState == NativeConnectionState.CLOSED
                 || newState == NativeConnectionState.FAILED
         ) {
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSED;
+            }
             owner.unregisterConnection(id);
             releaseServerOwnership();
         }
@@ -277,16 +326,29 @@ public final class FfmNativeConnection implements NativeConnection {
 
     void handleDataAvailable() {
         var l = listener;
-        if (l != null) {
+        if (l != null && state != NativeConnectionState.CLOSED
+                && state != NativeConnectionState.FAILED
+        ) {
             l.onDataAvailable();
         }
     }
 
     void handleWritable() {
         var l = listener;
-        if (l != null) {
+        if (l != null && state != NativeConnectionState.CLOSED
+                && state != NativeConnectionState.FAILED
+        ) {
             l.onWritable();
         }
+    }
+
+    public enum LifecycleState {
+
+        OPEN,
+        CLOSING,
+        CLOSED,
+        CLOSE_FAILED
+
     }
 
 }

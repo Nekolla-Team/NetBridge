@@ -85,7 +85,7 @@ async fn server_task_in_context(
     let stopped_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     ctx.servers_map().insert(
         server_id,
-        ServerHandle {
+        Arc::new(ServerHandle {
             endpoint: TransportEndpoint::Kcp(stop_tx),
             port: local.port(),
             max_connections,
@@ -93,15 +93,15 @@ async fn server_task_in_context(
             state: Arc::clone(&state),
             commit_lock: Arc::clone(&commit_lock),
             stopped_pair: Arc::clone(&stopped_pair),
-        },
+        }),
     );
-    ctx.event_sink().on_event(
-        crate::event::NB_EVENT_SERVER_STATE,
-        server_id,
-        crate::event::NB_SERVER_STATE_RUNNING as i64,
-        0,
-    );
-    let _ = tx.send(Ok(local.port()));
+    if tx.send(Ok(local.port())).is_err() {
+        // 启动等待已超时/接收端已 drop：回滚注册表并立即退出，杜绝 orphan server
+        ctx.servers_map().remove(&server_id);
+        drop(listener);
+        return;
+    }
+    ctx.emit_server_state(server_id, crate::SERVER_STATE_RUNNING);
 
     let ctx_clone = Arc::clone(&ctx);
     accept_loop_in_context(
@@ -163,7 +163,7 @@ async fn accept_loop_in_context(
             Some(peer),
         );
 
-        if !ctx.try_commit_accept(server_id, conn_id, handle) {
+        if !ctx.try_commit_accept(server_id, conn_id, Arc::new(handle)) {
             conn_count.fetch_sub(1, Ordering::Relaxed);
             let _ = session.close().await;
             continue;
@@ -187,20 +187,24 @@ async fn accept_loop_in_context(
             ),
         );
     }
-    // Accept loop has stopped accepting new connections.
-    // Signal stop completion immediately so stop_server unblocks.
+    // Accept loop 已停止接纳新连接。
+    // 立即通知停止完成，使 stop_server 不阻塞，服务端状态转为 STOPPED（INV-2, INV-9）。
     let (lock, cvar) = &*stopped_pair;
     if let Ok(mut g) = lock.lock() {
         *g = true;
         cvar.notify_all();
     }
 
-    // If there are active adopted sessions, keep listener alive in background until
-    // all active sessions disconnect (conn_count drops to 0) or context shuts down.
+    // 若仍有被 Java 接管的存活连接（conn_count > 0），在后台保留底层 listener 驱动已有 session 数据面；
+    // 任何新进连接均立即丢弃（绝不 admit、绝不发布 ACCEPTED）。
     while conn_count.load(Ordering::SeqCst) > 0 {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(20)) => {},
-            _ = listener.accept() => {},
+            acc = listener.accept() => {
+                if let Ok((stream, _)) = acc {
+                    drop(stream);
+                }
+            },
         }
     }
     drop(listener);

@@ -25,6 +25,8 @@ fn bind_socket(addr: SocketAddr, reuse_addr: bool) -> io::Result<UdpSocket> {
     if reuse_addr {
         // 尽力而为：个别平台不支持时忽略，不影响正确性。
         let _ = socket.set_reuse_address(true);
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        let _ = socket.set_reuse_port(true);
     }
     let _ = socket.set_recv_buffer_size(BUF_SIZE);
     let _ = socket.set_send_buffer_size(BUF_SIZE);

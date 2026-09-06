@@ -23,15 +23,19 @@ public final class FfmNativeContext implements AutoCloseable {
     private final NativeEventDispatcher dispatcher;
     private final AtomicLong activeOps = new AtomicLong();
     private final Object lifecycleLock = new Object();
-    private volatile boolean closing;
-    private volatile boolean destroyed;
+    private volatile State state = State.OPEN;
 
     public FfmNativeContext(
             FfmApiV1 api,
             MemorySegment contextPtr,
             NativeEventDispatcher dispatcher
     ) {
-        this(null, api, contextPtr, dispatcher);
+        this(
+                null,
+                api,
+                contextPtr,
+                dispatcher
+        );
     }
 
     public FfmNativeContext(
@@ -135,14 +139,14 @@ public final class FfmNativeContext implements AutoCloseable {
     }
 
     private void beginOp() {
-        if (closing) {
-            throw new NativeException("NativeContext is closing or closed");
+        if (state != State.OPEN) {
+            throw new NativeException("NativeContext is " + state);
         }
 
         activeOps.incrementAndGet();
-        if (closing) {
+        if (state != State.OPEN) {
             activeOps.decrementAndGet();
-            throw new NativeException("NativeContext is closing or closed");
+            throw new NativeException("NativeContext is " + state);
         }
     }
 
@@ -457,45 +461,39 @@ public final class FfmNativeContext implements AutoCloseable {
     }
 
     public void shutdown(int timeoutMillis) {
-        beginOp();
-        try {
-            shutdownLocked(timeoutMillis);
-        } finally {
-            endOp();
-        }
+        close(timeoutMillis);
     }
 
-    private void shutdownLocked(int timeoutMillis) {
-        try {
-            var status = (int) api.contextShutdown().invokeExact(contextPtr, timeoutMillis);
-            FfmStatus.checkStatus(status, "context_shutdown");
-        } catch (Throwable t) {
-            throw rethrow(t, "context_shutdown");
-        }
-    }
-
-    public synchronized void destroy() {
-        close();
-    }
-
-    @Override
-    public synchronized void close() {
-        if (destroyed) {
+    public synchronized void close(int timeoutMillis) {
+        if (state == State.CLOSED) {
             return;
         }
 
-        closing = true;
-        awaitDrain();
-        shutdownLocked(2000);
-        destroyLocked();
-        destroyed = true;
-        if (ownerLibrary != null) {
-            ownerLibrary.unregisterContext(this);
+        state = State.CLOSING;
+        var deadline = System.currentTimeMillis() + timeoutMillis;
+
+        try {
+            awaitDrain(deadline);
+            var remaining = Math.max(
+                    10,
+                    (int) (deadline - System.currentTimeMillis())
+            );
+            shutdownLocked(remaining);
+            destroyLocked();
+            state = State.CLOSED;
+            if (ownerLibrary != null) {
+                ownerLibrary.unregisterContext(this);
+            }
+        } catch (Throwable t) {
+            state = State.CLOSE_FAILED;
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new NativeException("failed to close native context", t);
         }
     }
 
-    private void awaitDrain() {
-        var deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MILLIS;
+    private void awaitDrain(long deadline) {
         while (activeOps.get() > 0) {
             if (System.currentTimeMillis() > deadline) {
                 throw new NativeException(
@@ -515,6 +513,18 @@ public final class FfmNativeContext implements AutoCloseable {
         }
     }
 
+    private void shutdownLocked(int timeoutMillis) {
+        try {
+            var status = (int) api.contextShutdown().invokeExact(
+                    contextPtr,
+                    timeoutMillis
+            );
+            FfmStatus.checkStatus(status, "context_shutdown");
+        } catch (Throwable t) {
+            throw rethrow(t, "context_shutdown");
+        }
+    }
+
     private void destroyLocked() {
         try {
             var status = (int) api.contextDestroy().invokeExact(contextPtr);
@@ -522,6 +532,28 @@ public final class FfmNativeContext implements AutoCloseable {
         } catch (Throwable t) {
             throw rethrow(t, "context_destroy");
         }
+    }
+
+    public synchronized void destroy() {
+        close();
+    }
+
+    @Override
+    public synchronized void close() {
+        close(DRAIN_TIMEOUT_MILLIS);
+    }
+
+    public State state() {
+        return state;
+    }
+
+    public enum State {
+
+        OPEN,
+        CLOSING,
+        CLOSED,
+        CLOSE_FAILED
+
     }
 
 }

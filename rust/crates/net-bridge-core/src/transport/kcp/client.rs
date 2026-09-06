@@ -32,7 +32,7 @@ pub fn connect_in_context(
     };
     ctx.conns().insert(
         conn_id,
-        ConnHandle::new(
+        Arc::new(ConnHandle::new(
             state.clone(),
             to_java_rx,
             to_transport_tx,
@@ -41,7 +41,7 @@ pub fn connect_in_context(
             None,
             true,
             None,
-        ),
+        )),
     );
     let host = host.to_string();
     let ctx_task = Arc::clone(ctx);
@@ -69,13 +69,7 @@ pub fn connect_in_context(
             return;
         };
         if state.load(Ordering::SeqCst) != crate::STATE_CLOSED {
-            state.store(crate::STATE_CONNECTED, Ordering::SeqCst);
-            ctx_task.event_sink().on_event(
-                crate::event::NB_EVENT_CONNECTION_STATE,
-                conn_id,
-                crate::event::abi_connection_state(crate::STATE_CONNECTED) as i64,
-                0,
-            );
+            ctx_task.emit_connected(conn_id);
         }
         super::connection::run_kcp_connection_with_sink(
             conn_id,

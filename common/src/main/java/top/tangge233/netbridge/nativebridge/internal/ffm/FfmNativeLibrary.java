@@ -228,7 +228,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
                 try {
                     stateLock.wait(20);
                 } catch (InterruptedException e) {
-                    state = State.OPEN;
+                    state = State.CLOSE_FAILED;
                     stateLock.notifyAll();
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(
@@ -252,7 +252,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
 
         if (firstError != null || !activeContexts.isEmpty()) {
             synchronized (stateLock) {
-                state = State.OPEN;
+                state = State.CLOSE_FAILED;
                 stateLock.notifyAll();
             }
             throw new IllegalStateException(
@@ -263,18 +263,30 @@ public final class FfmNativeLibrary implements AutoCloseable {
             );
         }
 
-        synchronized (stateLock) {
-            state = State.CLOSED;
-            stateLock.notifyAll();
+        try {
+            arena.close();
+            synchronized (stateLock) {
+                state = State.CLOSED;
+                stateLock.notifyAll();
+            }
+        } catch (Throwable t) {
+            synchronized (stateLock) {
+                state = State.CLOSE_FAILED;
+                stateLock.notifyAll();
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("Failed to close library Arena", t);
         }
-        arena.close();
     }
 
     public enum State {
 
         OPEN,
         CLOSING,
-        CLOSED
+        CLOSED,
+        CLOSE_FAILED
 
     }
 

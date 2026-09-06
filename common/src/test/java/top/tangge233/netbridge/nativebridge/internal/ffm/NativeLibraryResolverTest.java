@@ -65,4 +65,26 @@ class NativeLibraryResolverTest {
         }
     }
 
+    @Test
+    void windowsAarch64ThrowsNativeResourceException() {
+        var originalOs = System.getProperty("os.name");
+        var originalArch = System.getProperty("os.arch");
+        try {
+            System.setProperty("os.name", "Windows 11");
+            System.setProperty("os.arch", "aarch64");
+            var ex = assertThrows(
+                    NativeResourceException.class,
+                    NativeLibraryResolver::platformDir
+            );
+            assertEquals("UNSUPPORTED_PLATFORM:", ex.code());
+        } finally {
+            if (originalOs != null) {
+                System.setProperty("os.name", originalOs);
+            }
+            if (originalArch != null) {
+                System.setProperty("os.arch", originalArch);
+            }
+        }
+    }
+
 }

@@ -58,10 +58,17 @@ public final class ServerRuntime implements AutoCloseable {
                 adoptExecutor,
                 generationSequence.getAndIncrement()
         );
-        var started = next.start(mcPort, mcBindIp);
-        manager = started
-                ? next
-                : null;
+        this.manager = next;
+        var started = false;
+        try {
+            started = next.start(mcPort, mcBindIp);
+        } catch (Throwable t) {
+            this.manager = null;
+            throw t;
+        }
+        if (!started) {
+            this.manager = null;
+        }
         return started;
     }
 
@@ -90,8 +97,8 @@ public final class ServerRuntime implements AutoCloseable {
             return;
         }
 
-        closed = true;
         stop();
+        closed = true;
         adoptExecutor.shutdown();
         try {
             if (!adoptExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
@@ -106,9 +113,9 @@ public final class ServerRuntime implements AutoCloseable {
 
     public synchronized void stop() {
         var current = manager;
-        manager = null;
         if (current != null) {
             current.close();
+            manager = null;
         }
     }
 

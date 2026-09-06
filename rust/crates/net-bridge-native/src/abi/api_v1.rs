@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use net_bridge_core::NativeContext;
 use net_bridge_core::context::CONTEXT_STATE_CLOSED;
+use net_bridge_core::{BridgeError, NativeContext};
 
 use super::codec::*;
 use super::event_sink::CAbiEventSink;
@@ -499,10 +499,10 @@ unsafe extern "C" fn server_stop(context: *mut NbContext, server: u64) -> NbStat
             return NB_INVALID_ARGUMENT;
         }
         let ctx = unsafe { &(*context).0 };
-        if ctx.stop_server(server) {
-            NB_OK
-        } else {
-            NB_NOT_FOUND
+        match ctx.stop_server(server) {
+            Ok(()) => NB_OK,
+            Err(BridgeError::NoSuchConnection) => NB_NOT_FOUND,
+            Err(e) => map_error(e),
         }
     })
 }

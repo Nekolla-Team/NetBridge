@@ -121,7 +121,7 @@ fn kcp_loopback_roundtrip() {
     wait_state(&ctx, client, STATE_CONNECTED);
 
     ctx.close_connection(client);
-    ctx.stop_server(server);
+    let _ = ctx.stop_server(server);
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn kcp_sustained_and_idle_phase() {
     wait_read(&ctx, client, msg.len());
 
     ctx.close_connection(client);
-    ctx.stop_server(server);
+    let _ = ctx.stop_server(server);
 }
 
 #[test]
@@ -261,9 +261,10 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
 
     let server_conn = wait_accepted(&sink, server);
     wait_state(&ctx, server_conn, STATE_CONNECTED);
+    assert_eq!(wait_read(&ctx, server_conn, 7), b"warm-up");
 
     // Stop server
-    assert!(ctx.stop_server(server), "stop server 必须成功");
+    assert!(ctx.stop_server(server).is_ok(), "stop server 必须成功");
 
     // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
     let payload = b"kcp data after server stopped";

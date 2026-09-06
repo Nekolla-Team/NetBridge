@@ -52,14 +52,26 @@ public final class NativeServerTransport {
                 return;
             }
 
-            var channel = new NativeChannel(connection);
+            InetSocketAddress remoteAddr;
             try {
-                channel.setRemoteAddress(connection.remoteAddress());
-            } catch (RuntimeException e) {
-                channel.setRemoteAddress(
-                        new InetSocketAddress("0.0.0.0", 0)
+                remoteAddr = connection.remoteAddress();
+                if (remoteAddr == null) {
+                    throw new IllegalStateException(
+                            "Remote address unavailable for connection " + connection.id()
+                    );
+                }
+            } catch (Throwable t) {
+                NetBridge.LOGGER.warn(
+                        "Rejecting connection {}: failed to obtain remote address: {}",
+                        connection.id(),
+                        t.getMessage()
                 );
+                connection.close();
+                return;
             }
+
+            var channel = new NativeChannel(connection);
+            channel.setRemoteAddress(remoteAddr);
 
             var pipeline = channel.pipeline();
             pipeline.addLast(
@@ -96,7 +108,9 @@ public final class NativeServerTransport {
             var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
             var regFuture = group.register(channel);
             regFuture.addListener(f -> {
-                if (f.isSuccess()) {
+                if (f.isSuccess()
+                        && NetBridgeServices.serverRuntime().isSessionValid(sessionGeneration)
+                ) {
                     server.execute(() -> {
                         var sc = server.getConnection();
                         if (sc != null

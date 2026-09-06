@@ -25,7 +25,7 @@ pub async fn run_connection_with_sink(
     state: Arc<AtomicU32>,
     ctx: Arc<NativeContext>,
 ) {
-    let (write_blocked, outbound_bytes, inbound_bytes) = ctx
+    let (write_blocked, outbound_bytes, inbound_bytes, read_waker) = ctx
         .conns()
         .get(&conn_id)
         .map(|h| {
@@ -33,6 +33,7 @@ pub async fn run_connection_with_sink(
                 h.write_blocked.clone(),
                 h.outbound_bytes.clone(),
                 h.inbound_bytes.clone(),
+                h.read_waker.clone(),
             )
         })
         .unwrap_or_else(|| {
@@ -40,24 +41,24 @@ pub async fn run_connection_with_sink(
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                Arc::new(tokio::sync::Notify::new()),
             )
         });
-    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
-    let reader = {
-        let to_java_tx = to_java_tx.clone();
-        let ctx = Arc::clone(&ctx);
-        let inbound_bytes = inbound_bytes.clone();
-        let reader_state = state.clone();
-        tokio::spawn(async move {
-            let mut empty_streak = 0u32;
-            let mut clean_exit = true;
-            loop {
-                // Inbound byte budget backpressure
-                while inbound_bytes.load(Ordering::SeqCst) >= crate::DEFAULT_MAX_BUFFERED_BYTES {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
 
-                match recv.read_chunk(65536, true).await {
+    let mut empty_streak = 0u32;
+    loop {
+        if state.load(Ordering::SeqCst) == STATE_CLOSED || *cancel_rx.borrow() {
+            let _ = send.finish();
+            break;
+        }
+        let can_read = inbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES;
+        tokio::select! {
+            biased;
+            _ = cancel_rx.changed() => {
+                break;
+            }
+            res = recv.read_chunk(65536, true), if can_read => {
+                match res {
                     Ok(Some(chunk)) => {
                         if chunk.bytes.is_empty() {
                             empty_streak = empty_streak.saturating_add(1);
@@ -73,37 +74,30 @@ pub async fn run_connection_with_sink(
                             inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
                             break;
                         }
-                        // Linearized emit: suppressed if in terminal state
                         ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        if reader_state.load(Ordering::SeqCst) != crate::STATE_CLOSED {
-                            crate::report_error(format!("quic conn {conn_id}: read error: {e}"));
-                            clean_exit = false;
+                        match &e {
+                            quinn::ReadError::ClosedStream
+                            | quinn::ReadError::ConnectionLost(quinn::ConnectionError::ApplicationClosed(_))
+                            | quinn::ReadError::ConnectionLost(quinn::ConnectionError::LocallyClosed) => {
+                                // 远端正常关闭/应用级关闭/本地关闭
+                                break;
+                            }
+                            _ => {
+                                if state.load(Ordering::SeqCst) != STATE_CLOSED {
+                                    crate::report_error(format!("quic conn {conn_id}: read error: {e}"));
+                                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
+                                }
+                                break;
+                            }
                         }
-                        break;
                     }
                 }
             }
-            let _ = reader_done_tx.send(clean_exit).await;
-        })
-    };
-
-    loop {
-        if state.load(Ordering::SeqCst) == STATE_CLOSED {
-            let _ = send.finish();
-            break;
-        }
-        tokio::select! {
-            _ = cancel_rx.changed() => {
-                break;
-            }
-            done = reader_done_rx.recv() => {
-                if done == Some(false) && state.load(Ordering::SeqCst) != STATE_CLOSED {
-                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
-                }
-                break;
+            _ = read_waker.notified(), if !can_read => {
+                // Java 侧消费了入站数据，唤醒重新检查 can_read
             }
             cmd = to_transport_rx.recv() => match cmd {
                 Some(Command::Write(bytes)) => {
@@ -135,6 +129,5 @@ pub async fn run_connection_with_sink(
         }
         _ => {}
     }
-    reader.abort();
     conn.close(0u32.into(), b"net-bridge close");
 }

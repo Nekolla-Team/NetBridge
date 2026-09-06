@@ -2,6 +2,8 @@ package top.tangge233.netbridge.nativebridge.internal.ffm;
 
 import top.tangge233.netbridge.nativebridge.*;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,7 +19,7 @@ public final class FfmNativeServer implements NativeServer {
     private final Queue<FfmNativeConnection> undeliveredChildren = new ConcurrentLinkedQueue<>();
 
     private volatile @Nullable NativeServerListener listener;
-    private volatile boolean closed;
+    private volatile LifecycleState lifecycle = LifecycleState.OPEN;
 
     FfmNativeServer(
             FfmNativeTransportBackend owner,
@@ -46,12 +48,23 @@ public final class FfmNativeServer implements NativeServer {
     }
 
     @Override
-    public synchronized void setListener(NativeServerListener listener) {
-        this.listener = listener;
+    public void setListener(NativeServerListener listener) {
+        List<FfmNativeConnection> toDeliver = new ArrayList<>();
+        synchronized (this) {
+            this.listener = listener;
+            if (listener != null) {
+                while (!undeliveredChildren.isEmpty()) {
+                    var child = undeliveredChildren.poll();
+                    if (child != null) {
+                        toDeliver.add(child);
+                    }
+                }
+            }
+        }
+
         if (listener != null) {
-            while (!undeliveredChildren.isEmpty()) {
-                var child = undeliveredChildren.poll();
-                if (child != null && activeChildren.contains(child)
+            for (var child : toDeliver) {
+                if (activeChildren.contains(child)
                         && child.state() != NativeConnectionState.CLOSED
                         && child.state() != NativeConnectionState.FAILED) {
                     listener.onAccepted(child);
@@ -61,43 +74,77 @@ public final class FfmNativeServer implements NativeServer {
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
-            return;
+    public void close() {
+        synchronized (this) {
+            if (lifecycle == LifecycleState.CLOSED) {
+                return;
+            }
+            lifecycle = LifecycleState.CLOSING;
         }
-
-        closed = true;
-        listener = null;
 
         try {
             owner.context().serverStop(id);
-        } catch (RuntimeException e) {
-            throw new NativeException("failed to stop native server " + id, e);
-        } finally {
-            undeliveredChildren.clear();
-            activeChildren.clear();
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSED;
+                listener = null;
+            }
             owner.unregisterServer(id);
+        } catch (Throwable t) {
+            if (t instanceof NativeException ne
+                    && ne.statusCode() == FfmStatus.NB_NOT_FOUND
+            ) {
+                synchronized (this) {
+                    lifecycle = LifecycleState.CLOSED;
+                    listener = null;
+                }
+                owner.unregisterServer(id);
+                return;
+            }
+
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSE_FAILED;
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new NativeException("failed to stop native server " + id, t);
         }
     }
 
     private void ensureOpen() {
-        if (closed) {
+        if (lifecycle == LifecycleState.CLOSED) {
             throw new NativeException("NativeServer " + id + " is closed");
         }
     }
 
-    synchronized void handleAccepted(FfmNativeConnection connection) {
-        if (closed) {
+    public LifecycleState lifecycle() {
+        return lifecycle;
+    }
+
+    void handleAccepted(FfmNativeConnection connection) {
+        boolean shouldClose;
+        NativeServerListener l;
+        synchronized (this) {
+            if (lifecycle == LifecycleState.CLOSED) {
+                shouldClose = true;
+                l = null;
+            } else {
+                shouldClose = false;
+                activeChildren.add(connection);
+                l = listener;
+                if (l == null) {
+                    undeliveredChildren.add(connection);
+                }
+            }
+        }
+
+        if (shouldClose) {
             connection.close();
             return;
         }
 
-        activeChildren.add(connection);
-        var l = listener;
         if (l != null) {
             l.onAccepted(connection);
-        } else {
-            undeliveredChildren.add(connection);
         }
     }
 
@@ -111,6 +158,15 @@ public final class FfmNativeServer implements NativeServer {
         if (l != null) {
             l.onStateChanged(newState);
         }
+    }
+
+    public enum LifecycleState {
+
+        OPEN,
+        CLOSING,
+        CLOSED,
+        CLOSE_FAILED
+
     }
 
 }

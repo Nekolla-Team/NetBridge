@@ -103,20 +103,7 @@ final class DelegatingChannelFuture implements ChannelFuture {
             Channel channel,
             @Nullable ChannelFuture delegateFuture
     ) {
-        synchronized (lock) {
-            this.currentChannel = channel;
-            this.currentDelegate = delegateFuture;
-            if (state == State.CANCELLED) {
-                try {
-                    var _ = channel.close();
-                } catch (Throwable _) {
-                    // ignore
-                }
-                if (delegateFuture != null) {
-                    delegateFuture.cancel(true);
-                }
-            }
-        }
+        registerAttempt(channel, delegateFuture);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -134,6 +121,28 @@ final class DelegatingChannelFuture implements ChannelFuture {
                         e
                 );
             }
+        }
+    }
+
+    boolean registerAttempt(
+            Channel channel,
+            @Nullable ChannelFuture delegateFuture
+    ) {
+        synchronized (lock) {
+            if (state != State.IN_PROGRESS) {
+                try {
+                    var _ = channel.close();
+                } catch (Throwable _) {
+                    // ignore
+                }
+                if (delegateFuture != null) {
+                    delegateFuture.cancel(true);
+                }
+                return false;
+            }
+            this.currentChannel = channel;
+            this.currentDelegate = delegateFuture;
+            return true;
         }
     }
 
@@ -267,14 +276,16 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
         if (state == State.FAILED) {
             var c = cause;
-            if (c instanceof RuntimeException re) {
-                throw re;
+            if (c != null) {
+                sneakyThrow(c);
             }
-            if (c instanceof Error er) {
-                throw er;
-            }
-            throw new IllegalStateException(c);
+            throw new IllegalStateException("future failed without cause");
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void sneakyThrow(Throwable t) throws E {
+        throw (E) t;
     }
 
     public boolean isAttemptCancelled() {

@@ -7,6 +7,8 @@ import top.tangge233.netbridge.nativebridge.NativeTransportBackend;
 import top.tangge233.netbridge.transport.TransportMode;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jspecify.annotations.Nullable;
@@ -21,6 +23,7 @@ public final class ClientRuntime implements AutoCloseable {
     private final ConnectionPlanner planner;
     private final ConnectionExecutor executor;
     private final Set<DelegatingChannelFuture> activeFutures = ConcurrentHashMap.newKeySet();
+    private final Object lifecycleLock = new Object();
     private volatile boolean closed;
 
     public ClientRuntime(
@@ -45,14 +48,20 @@ public final class ClientRuntime implements AutoCloseable {
             ConnectionExecutorAdapter adapter
     ) {
         var future = new DelegatingChannelFuture(adapter.eventLoopGroup());
-        if (closed) {
-            stateStore.idle();
-            future.completeFailure(new IllegalStateException("ClientRuntime is closed"), null);
-            return future;
+        synchronized (lifecycleLock) {
+            if (closed) {
+                stateStore.idle();
+                future.completeFailure(new IllegalStateException("ClientRuntime is closed"), null);
+                return future;
+            }
+            activeFutures.add(future);
         }
 
-        activeFutures.add(future);
-        future.addListener(_ -> activeFutures.remove(future));
+        future.addListener(_ -> {
+            synchronized (lifecycleLock) {
+                activeFutures.remove(future);
+            }
+        });
 
         var current = settings.current();
         var plan = planner.plan(
@@ -93,20 +102,24 @@ public final class ClientRuntime implements AutoCloseable {
     }
 
     @Override
-    public synchronized void close() {
-        if (closed) {
-            return;
+    public void close() {
+        List<DelegatingChannelFuture> toCancel;
+        synchronized (lifecycleLock) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            toCancel = new ArrayList<>(activeFutures);
+            activeFutures.clear();
         }
 
-        closed = true;
-        for (var future : activeFutures) {
+        for (var future : toCancel) {
             try {
                 future.cancel(true);
             } catch (Throwable _) {
                 // ignore
             }
         }
-        activeFutures.clear();
         stateStore.idle();
     }
 

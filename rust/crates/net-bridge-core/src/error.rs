@@ -87,9 +87,9 @@ pub enum BridgeError {
     #[error("object id space exhausted")]
     IdOverflow,
 
-    /// 迁移期逃生口：尚未类型化的消息（逐步收敛到具体变体）。
-    #[error("{0}")]
-    Other(String),
+    /// 参数非法。
+    #[error("invalid argument: {0}")]
+    InvalidArgument(&'static str),
 }
 
 impl BridgeError {
@@ -107,8 +107,10 @@ impl BridgeError {
             Self::Timeout => 4,
             Self::Protocol(_) => 5,
             Self::Cancelled | Self::ConnectionClosed | Self::NoSuchConnection => 6,
-            Self::Internal(_) | Self::IdOverflow | Self::RuntimeUnavailable => 7,
-            Self::Other(_) => 0,
+            Self::Internal(_)
+            | Self::IdOverflow
+            | Self::RuntimeUnavailable
+            | Self::InvalidArgument(_) => 7,
         }
     }
 }

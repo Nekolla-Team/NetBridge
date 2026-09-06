@@ -122,7 +122,7 @@ fn quic_loopback_roundtrip() {
     assert_eq!(wait_read(&ctx, client, reply.len()), reply);
 
     ctx.close_connection(client);
-    ctx.stop_server(server);
+    let _ = ctx.stop_server(server);
     wait_terminal(&ctx, client);
 }
 
@@ -141,7 +141,7 @@ async fn quic_server_stop_does_not_kill_adopted_connections() {
     wait_state(&ctx, server_conn, STATE_CONNECTED);
 
     // Stop server
-    assert!(ctx.stop_server(server), "stop server 必须成功");
+    assert!(ctx.stop_server(server).is_ok(), "stop server 必须成功");
 
     // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
     let payload = b"data after server stopped";
@@ -228,7 +228,7 @@ async fn quic_accepted_guarantees_stream_readiness_and_no_accepted_on_stream_fai
 
     conn.close(0u32.into(), b"done");
     ctx.close_connection(server_conn);
-    ctx.stop_server(server);
+    let _ = ctx.stop_server(server);
 }
 
 #[test]

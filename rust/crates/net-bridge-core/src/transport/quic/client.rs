@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
+use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTING};
 
 /// 经 NativeContext 发起 QUIC 客户端连接。
 pub fn connect_in_context(
@@ -25,7 +25,7 @@ pub fn connect_in_context(
     let conn_id = ctx.allocate_id()?;
     ctx.conns().insert(
         conn_id,
-        ConnHandle::new(
+        Arc::new(ConnHandle::new(
             state.clone(),
             to_java_rx,
             to_transport_tx.clone(),
@@ -34,7 +34,7 @@ pub fn connect_in_context(
             None,
             true,
             None,
-        ),
+        )),
     );
 
     let host = host.to_string();
@@ -42,13 +42,7 @@ pub fn connect_in_context(
     ctx.spawn_connection_task("quic connect task in context", conn_id, async move {
         if let Some((conn, send, recv)) = establish(&ctx_task, &host, port, conn_id, &state).await {
             ctx_task.set_conn_remote_addr(conn_id, conn.remote_address());
-            state.store(STATE_CONNECTED, Ordering::SeqCst);
-            ctx_task.event_sink().on_event(
-                crate::event::NB_EVENT_CONNECTION_STATE,
-                conn_id,
-                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
-                0,
-            );
+            ctx_task.emit_connected(conn_id);
             super::connection::run_connection_with_sink(
                 conn_id,
                 conn,

@@ -264,6 +264,19 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                 ) {
                     failures.add("$rel: process-global native registries are forbidden in net-bridge-core")
                 }
+                if (text.contains("BridgeError::Other") || text.contains("Other(")) {
+                    failures.add("$rel: BridgeError::Other escape hatch is forbidden in net-bridge-core")
+                }
+                if (!rel.contains("tests") && !rel.contains("context.rs") && !rel.contains("lib.rs")) {
+                    if (text.contains(".on_event(")) {
+                        failures.add("$rel: direct on_event call is forbidden; use unified event publisher")
+                    }
+                }
+                if (rel.startsWith("rust/crates/net-bridge-core/src/transport/") && !rel.contains("tests")) {
+                    if (text.contains("tokio::spawn")) {
+                        failures.add("$rel: raw tokio::spawn in transports is forbidden")
+                    }
+                }
             }
         }
         val coreCargo = rootDir.resolve("rust/crates/net-bridge-core/Cargo.toml")

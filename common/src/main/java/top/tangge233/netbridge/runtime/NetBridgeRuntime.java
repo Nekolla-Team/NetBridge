@@ -7,7 +7,11 @@ import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
 import top.tangge233.netbridge.nativebridge.NativeTransportBackend;
 import top.tangge233.netbridge.nativebridge.UnavailableNativeTransportBackend;
+import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
 import top.tangge233.netbridge.server.ServerRuntime;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public final class NetBridgeRuntime implements AutoCloseable {
 
@@ -17,7 +21,7 @@ public final class NetBridgeRuntime implements AutoCloseable {
     private final NativeTransportBackend nativeBackend;
     private final ClientRuntime clientRuntime;
     private final ServerRuntime serverRuntime;
-    private volatile boolean closed;
+    private volatile State state = State.OPEN;
 
     public NetBridgeRuntime(
             ConfigPaths configPaths,
@@ -33,6 +37,10 @@ public final class NetBridgeRuntime implements AutoCloseable {
         this.serverRuntime = new ServerRuntime(nativeBackend, serverConfigStore);
     }
 
+    public State state() {
+        return state;
+    }
+
     public ConfigPaths configPaths() {
         return configPaths;
     }
@@ -46,7 +54,8 @@ public final class NetBridgeRuntime implements AutoCloseable {
     }
 
     public boolean nativeAvailable() {
-        return !(nativeBackend instanceof UnavailableNativeTransportBackend)
+        return state == State.OPEN
+                && !(nativeBackend instanceof UnavailableNativeTransportBackend)
                 && nativeBackend.availability().available();
     }
 
@@ -60,18 +69,53 @@ public final class NetBridgeRuntime implements AutoCloseable {
 
     @Override
     public synchronized void close() {
-        if (closed) {
+        if (state == State.CLOSED) {
             return;
         }
 
-        closed = true;
-        serverRuntime.close();
-        clientRuntime.close();
+        state = State.CLOSING;
+        List<Throwable> errors = new ArrayList<>();
+
+        try {
+            serverRuntime.close();
+        } catch (Throwable t) {
+            NetBridge.LOGGER.warn("Error closing server runtime: {}", t.getMessage());
+            errors.add(t);
+        }
+
+        try {
+            clientRuntime.close();
+        } catch (Throwable t) {
+            NetBridge.LOGGER.warn("Error closing client runtime: {}", t.getMessage());
+            errors.add(t);
+        }
+
         try {
             nativeBackend.close();
-        } catch (RuntimeException e) {
-            NetBridge.LOGGER.warn("Error closing native backend: {}", e.getMessage());
+        } catch (Throwable t) {
+            NetBridge.LOGGER.warn("Error closing native backend: {}", t.getMessage());
+            errors.add(t);
         }
+
+        if (!errors.isEmpty()) {
+            state = State.CLOSE_FAILED;
+            var primary = new NativeResourceException("Failed to close NetBridgeRuntime cleanly");
+            for (var err : errors) {
+                primary.addSuppressed(err);
+            }
+            throw primary;
+        }
+
+        state = State.CLOSED;
+    }
+
+    public enum State {
+
+        OPEN,
+        CLOSING,
+        CLOSED,
+        CLOSE_FAILED
+
     }
 
 }

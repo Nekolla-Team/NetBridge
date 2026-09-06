@@ -62,8 +62,16 @@ public final class NativeLibraryResolver {
         var os = normalizedOs();
         var arch = normalizedArch();
         return switch (os) {
-            case "windows", "macos", "linux" -> switch (arch) {
-                case "x86_64", "aarch64" -> os + "-" + arch;
+            case "linux" -> switch (arch) {
+                case "x86_64", "aarch64" -> "linux-" + arch;
+                default -> throw unsupportedPlatform();
+            };
+            case "macos" -> switch (arch) {
+                case "x86_64", "aarch64" -> "macos-" + arch;
+                default -> throw unsupportedPlatform();
+            };
+            case "windows" -> switch (arch) {
+                case "x86_64" -> "windows-x86_64";
                 default -> throw unsupportedPlatform();
             };
             default -> throw unsupportedPlatform();
@@ -271,7 +279,8 @@ public final class NativeLibraryResolver {
                     if (sha256Hex(inTarget).equals(sha256Hex(inTmp))) {
                         return;
                     }
-                } catch (IOException _) {
+                } catch (IOException expected) {
+                    // Ignore and proceed to replace existing target
                 }
             }
             Files.move(

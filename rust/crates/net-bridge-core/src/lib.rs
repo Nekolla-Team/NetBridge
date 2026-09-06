@@ -55,6 +55,8 @@ pub struct ConnHandle {
     pub to_java: Arc<Mutex<(mpsc::Receiver<Bytes>, VecDeque<Bytes>)>>,
     pub to_transport: mpsc::Sender<Command>,
     pub cancel_tx: tokio::sync::watch::Sender<bool>,
+    /// 入站容量释放通知，唤醒读数据面。
+    pub read_waker: Arc<tokio::sync::Notify>,
     pub server_id: Option<u64>,
     /// 服务端连接的每实例活跃计数（客户端连接为 None）；remove 时递减。
     pub server_count: Option<Arc<AtomicUsize>>,
@@ -70,7 +72,7 @@ pub struct ConnHandle {
     /// 终态事件（FAILED/CLOSED）只发一次的闸。
     pub terminal_sent: AtomicBool,
     /// 连接真实对端地址（Java 侧 ban/限速等 IP 管控）。
-    pub remote_addr: Option<SocketAddr>,
+    pub remote_addr: std::sync::RwLock<Option<SocketAddr>>,
     /// 串行化连接事件以保证终态事件之后绝无非终态事件。
     event_lock: Mutex<()>,
 }
@@ -93,6 +95,7 @@ impl ConnHandle {
             to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
             to_transport,
             cancel_tx,
+            read_waker: Arc::new(tokio::sync::Notify::new()),
             server_id,
             server_count,
             early_write,
@@ -100,12 +103,13 @@ impl ConnHandle {
             outbound_bytes: Arc::new(AtomicUsize::new(0)),
             inbound_bytes: Arc::new(AtomicUsize::new(0)),
             terminal_sent: AtomicBool::new(false),
-            remote_addr,
+            remote_addr: std::sync::RwLock::new(remote_addr),
             event_lock: Mutex::new(()),
         }
     }
 
     /// 尝试发送非终态事件（DATA_AVAILABLE / WRITABLE）。如果终态已标记或已发出，则静默丢弃。
+    /// 关键：释放锁后才调用 foreign callback（INV-4）。
     pub fn emit_non_terminal(
         &self,
         sink: &dyn EventSink,
@@ -114,18 +118,51 @@ impl ConnHandle {
         arg0: i64,
         arg1: i64,
     ) -> bool {
-        let _guard = match self.event_lock.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+        let should_emit = {
+            let _guard = match self.event_lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            !self.terminal_sent.load(Ordering::SeqCst)
         };
-        if self.terminal_sent.load(Ordering::SeqCst) {
-            return false;
+        if should_emit {
+            sink.on_event(kind, conn_id, arg0, arg1);
+            true
+        } else {
+            false
         }
-        sink.on_event(kind, conn_id, arg0, arg1);
-        true
+    }
+
+    /// 原子触发连接成功状态事件（CONNECTED）。如果终态已标记则静默丢弃。
+    /// 关键：释放锁后才调用 foreign callback（INV-4）。
+    pub fn emit_connected(&self, sink: &dyn EventSink, conn_id: u64) -> bool {
+        let should_emit = {
+            let _guard = match self.event_lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if self.terminal_sent.load(Ordering::SeqCst) {
+                false
+            } else {
+                self.state.store(STATE_CONNECTED, Ordering::SeqCst);
+                true
+            }
+        };
+        if should_emit {
+            sink.on_event(
+                crate::event::NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
+                0,
+            );
+            true
+        } else {
+            false
+        }
     }
 
     /// 原子触发终态事件（FAILED/CLOSED）恰好一次，并设立硬性事件屏障（杜绝任何后续事件）。
+    /// 关键：释放锁后才调用 foreign callback（INV-4）。
     pub fn emit_terminal(
         &self,
         sink: &dyn EventSink,
@@ -133,21 +170,29 @@ impl ConnHandle {
         internal_state: u32,
         reason_code: i64,
     ) -> bool {
-        let _guard = match self.event_lock.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+        let should_emit = {
+            let _guard = match self.event_lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if self.terminal_sent.swap(true, Ordering::SeqCst) {
+                false
+            } else {
+                self.state.store(internal_state, Ordering::SeqCst);
+                true
+            }
         };
-        if self.terminal_sent.swap(true, Ordering::SeqCst) {
-            return false;
+        if should_emit {
+            sink.on_event(
+                crate::event::NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(internal_state) as i64,
+                reason_code,
+            );
+            true
+        } else {
+            false
         }
-        self.state.store(internal_state, Ordering::SeqCst);
-        sink.on_event(
-            crate::event::NB_EVENT_CONNECTION_STATE,
-            conn_id,
-            crate::event::abi_connection_state(internal_state) as i64,
-            reason_code,
-        );
-        true
     }
 }
 
