@@ -44,11 +44,12 @@ pub static API_V1: NbApiV1 = NbApiV1 {
     reserved: [0; 8],
 };
 
-/// 获取 net-bridge C ABI v1 函数表。
+/// Returns the net-bridge C ABI v1 function table.
 ///
 /// # Safety
 ///
-/// `out_api` 必须是指向 `*const NbApiV1` 的有效可写指针对齐内存，或者为 null（将返回 `NB_INVALID_ARGUMENT`）。
+/// `out_api` must be NULL or point to writable, correctly aligned storage for
+/// a `*const nb_api_v1_t`. A NULL `out_api` yields `NB_INVALID_ARGUMENT`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn netbridge_get_api(
     requested_major: u32,

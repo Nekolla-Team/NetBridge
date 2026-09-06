@@ -1,6 +1,8 @@
 [workspace]
-members = ["crates/net-bridge-core",
+members = [
+    "crates/net-bridge-core",
     "crates/net-bridge-native",
+    "xtask",
 ]
 resolver = "2"
 

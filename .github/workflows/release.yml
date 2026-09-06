@@ -55,6 +55,10 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
+      - name: Verify checked-in ABI header is up to date (cbindgen drift check)
+        working-directory: rust
+        run: cargo xtask abi-header check
+
   abi-check:
     name: ABI / symbol / FFM bootstrap check
     runs-on: ubuntu-latest
@@ -88,7 +92,19 @@ jobs:
           fi
           echo "exported business symbols: $symbols"
 
-      - name: Verify native header / ABI constants
+      - name: Verify native header / ABI constants (cbindgen drift check)
+        run: ./gradlew verifyNativeHeader
+
+      - name: Compile generated header as C11 and C++17 (syntax smoke)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only \
+            -I rust/crates/net-bridge-native/include \
+            rust/crates/net-bridge-native/tests/header_smoke.c
+          c++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only \
+            -I rust/crates/net-bridge-native/include \
+            -x c++ rust/crates/net-bridge-native/tests/header_smoke.c
+
+      - name: Architecture verification (FFM allowlist / JNI zero / purity)
         run: ./gradlew verifyArchitecture -PskipNativeBuild
 
       - name: Run FFM bootstrap + integration tests (--illegal-native-access=deny)

@@ -117,6 +117,16 @@ cargo test --workspace                          # Rust core/native tests
 ./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest
 ```
 
+The public C ABI header (`rust/crates/net-bridge-native/include/netbridge.h`) is **generated** from
+the Rust ABI definitions with pinned cbindgen and checked in. It must never be hand-edited:
+
+```bash
+./gradlew updateNativeHeader                     # regenerate after Rust ABI changes
+./gradlew verifyNativeHeader                     # fail if the checked-in header is stale
+```
+
+or, from `rust/`: `cargo xtask abi-header update` / `cargo xtask abi-header check`.
+
 For development against a locally built cdylib, point the loader at it explicitly (production never
 falls back to `java.library.path` / `System.load`):
 

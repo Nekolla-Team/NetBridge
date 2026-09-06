@@ -124,6 +124,16 @@ cargo test --workspace                          # Rust core/native 测试
 ./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest
 ```
 
+公共 C ABI 头（`rust/crates/net-bridge-native/include/netbridge.h`）由固定版本 cbindgen 从 Rust ABI
+定义**生成**并随仓库提交，禁止手工编辑：
+
+```bash
+./gradlew updateNativeHeader                     # Rust ABI 变更后重新生成
+./gradlew verifyNativeHeader                     # checked-in header 过期即失败
+```
+
+或进入 `rust/` 执行：`cargo xtask abi-header update` / `cargo xtask abi-header check`。
+
 本地调试自建 cdylib 时可显式指定路径（生产不回退 `java.library.path` / `System.load`）：
 
 ```text

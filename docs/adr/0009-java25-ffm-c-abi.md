@@ -97,3 +97,22 @@ Java、Rust、native ABI、状态所有权与回调一起重构到最终形态�
 - **native manifest fail-closed**：打包 manifest 缺失/畸形/不匹配一律拒绝加载 （
   `NativeResourceException`），缓存命中前重验内容；并发提取 temp+atomic move 安全； 不支持平台 typed
   `UNSUPPORTED_PLATFORM`。
+
+## 增补：netbridge.h 生成策略（cbindgen 集成）
+
+- **源真相**：Rust C ABI 定义（`rust/crates/net-bridge-native/src/abi/`）是 `netbridge.h` 的唯一源真相，
+  不是手工维护的 C 头文件。
+- **生成**：`netbridge.h` 由固定版本 cbindgen `0.29.2`（经 `rust/xtask` 依赖锁入 `Cargo.lock`）确定性生成，
+  并随仓库提交；手工修改被禁止。
+- **命令**：更新用 `./gradlew updateNativeHeader` 或 `cd rust && cargo xtask abi-header update`；校验用
+  `./gradlew verifyNativeHeader` 或 `cargo xtask abi-header check`（永不写入）。
+- **CI drift gate**：PR CI 与 release CI 都真实运行生成器校验；header 过期或手工改动即失败，release
+  在打包前拦截。
+- **生成不取代测试**：Rust `repr(C)` 布局测试、Java `MemoryLayout` 测试与真实 FFM 集成测试保持必需，
+  它们与 cbindgen drift gate 互补验证。
+- **jextract**：保持为未来可选消费者；生成头保持普通 C，但当前生产构建不引入 jextract， Java FFM
+  仍为手工、生命周期感知的实现。
+
+## 历史说明（已取代）
+
+早期"手写很小稳定 C header + 布局测试"的建议（见重构计划旧版）已被上述 cbindgen 决策取代。
