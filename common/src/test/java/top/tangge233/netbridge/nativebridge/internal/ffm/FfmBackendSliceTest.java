@@ -22,7 +22,7 @@ class FfmBackendSliceTest {
 
     @BeforeAll
     static void setUp() {
-        nativeLibPath = FfmTestSupport.findNativeLibrary();
+        nativeLibPath = FfmTestSupport.requireNativeLibraryOrSkip();
     }
 
     @Test
