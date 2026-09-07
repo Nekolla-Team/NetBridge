@@ -3,10 +3,13 @@ package top.tangge233.netbridge.client;
 import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.ability.NetworksAbility;
 import top.tangge233.netbridge.ability.NetworksEntry;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 import top.tangge233.netbridge.transport.TransportMode;
 import top.tangge233.netbridge.transport.TransportTarget;
 
 import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.IntStream;
 
@@ -17,11 +20,8 @@ class ClientCachesAndStateTest {
     @Test
     void capabilityCacheEvictsLru() {
         var cache = new ServerCapabilityCache();
-        var advertised = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                2443,
-                "net-bri-quic/1"
+        var advertised = NetworksAbility.of(Map.of(
+                AcceleratedTransport.QUIC, new NetworksEntry(true, null, 2443)
         ));
         IntStream.rangeClosed(1, 300)
                 .forEachOrdered(i -> cache.record(
@@ -42,12 +42,164 @@ class ClientCachesAndStateTest {
     }
 
     @Test
+    void successCacheTtlBoundaryAndDisabledSemantics() {
+        var now = new AtomicLong(0);
+        var cache = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ofNanos(100)
+        );
+        var key = addr(25566);
+
+        cache.record(key, quicTarget());
+        assertTrue(
+                cache.lookup(key, TransportMode.QUIC).isPresent(),
+                "before expiry the entry must be present"
+        );
+
+        now.addAndGet(99);
+        assertTrue(
+                cache.lookup(key, TransportMode.QUIC).isPresent(),
+                "just before the boundary the entry must be present"
+        );
+
+        now.addAndGet(1);
+        assertTrue(
+                cache.lookup(key, TransportMode.QUIC).isEmpty(),
+                "at the exact expiry boundary the entry is expired (<= semantics)"
+        );
+
+        var zeroTtl = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ZERO
+        );
+        zeroTtl.record(key, quicTarget());
+        assertTrue(
+                zeroTtl.lookup(key, TransportMode.QUIC).isEmpty(),
+                "zero TTL disables caching"
+        );
+
+        var noCapacity = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ofMinutes(1),
+                0
+        );
+        noCapacity.record(key, quicTarget());
+        assertTrue(
+                noCapacity.lookup(key, TransportMode.QUIC).isEmpty(),
+                "maxEntries <= 0 disables caching"
+        );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SuccessfulEndpointCache(
+                        now::get,
+                        Duration.ofMillis(-1)
+                ),
+                "negative TTL is rejected at construction"
+        );
+    }
+
+    private static TransportTarget quicTarget() {
+        return new TransportTarget(
+                AcceleratedTransport.QUIC,
+                new InetSocketAddress("1.2.3.4", 9999)
+        );
+    }
+
+    @Test
+    void successCacheEvictsOldestExpiryWhenOverCapacity() {
+        var now = new AtomicLong(0);
+        var cache = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ofNanos(1000),
+                2
+        );
+
+        cache.record(addr(1), quicTarget());
+        now.addAndGet(1);
+        cache.record(addr(2), quicTarget());
+        now.addAndGet(1);
+        cache.record(addr(3), quicTarget());
+
+        assertTrue(
+                cache.lookup(addr(1), TransportMode.QUIC).isEmpty(),
+                "over-capacity evicts the entry with the oldest expiry"
+        );
+        assertTrue(cache.lookup(addr(2), TransportMode.QUIC).isPresent());
+        assertTrue(cache.lookup(addr(3), TransportMode.QUIC).isPresent());
+    }
+
+    @Test
+    void successCacheEvictsExpiredEntriesBeforeCapacity() {
+        var now = new AtomicLong(0);
+        var cache = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ofNanos(100),
+                1
+        );
+
+        cache.record(addr(1), quicTarget());
+        now.addAndGet(500);
+        cache.record(addr(2), quicTarget());
+
+        assertTrue(
+                cache.lookup(addr(1), TransportMode.QUIC).isEmpty(),
+                "expired entries are removed before capacity eviction"
+        );
+        assertTrue(cache.lookup(addr(2), TransportMode.QUIC).isPresent());
+    }
+
+    @Test
+    void successCacheRecordResetsTtlAndOverwritesValue() {
+        var now = new AtomicLong(0);
+        var cache = new SuccessfulEndpointCache(
+                now::get,
+                Duration.ofNanos(100),
+                1
+        );
+        var key = addr(25567);
+
+        cache.record(key, quicTarget());
+        now.addAndGet(90);
+        cache.record(key, quicTarget());
+        now.addAndGet(90);
+        assertTrue(
+                cache.lookup(key, TransportMode.QUIC).isPresent(),
+                "re-recording resets the TTL window"
+        );
+    }
+
+    @Test
+    void capabilityCacheCapacityAndDisabledSemantics() {
+        var advertised = NetworksAbility.of(Map.of(
+                AcceleratedTransport.QUIC, new NetworksEntry(true, null, 2443)
+        ));
+
+        var small = new ServerCapabilityCache(2);
+        small.record(addr(1), advertised);
+        small.record(addr(2), advertised);
+        small.record(addr(3), advertised);
+        assertTrue(
+                small.get(addr(1)).entries().isEmpty(),
+                "LRU evicts the least recently used entry"
+        );
+        assertFalse(small.get(addr(3)).entries().isEmpty());
+
+        var disabled = new ServerCapabilityCache(0);
+        disabled.record(addr(1), advertised);
+        assertTrue(
+                disabled.get(addr(1)).entries().isEmpty(),
+                "maxEntries <= 0 disables the capability cache"
+        );
+    }
+
+    @Test
     void successCacheModeScopedAndExpiring() {
         var now = new AtomicLong(1000);
-        var cache = new SuccessfulEndpointCache(now::get, 5000);
+        var cache = new SuccessfulEndpointCache(now::get, Duration.ofNanos(5000));
         var key = addr(25565);
         var target = new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("1.2.3.4", 9999)
         );
 
@@ -55,7 +207,7 @@ class ClientCachesAndStateTest {
         cache.record(key, target);
         assertEquals(
                 9999,
-                cache.lookup(key, TransportMode.QUIC).orElseThrow().endpoint().getPort()
+                cache.lookup(key, TransportMode.QUIC).orElseThrow().address().getPort()
         );
 
         assertTrue(
@@ -75,11 +227,11 @@ class ClientCachesAndStateTest {
         var cache = new SuccessfulEndpointCache();
         var key = addr(25565);
         var first = new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("1.2.3.4", 1111)
         );
         var second = new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("5.6.7.8", 2222)
         );
         cache.record(
@@ -92,7 +244,7 @@ class ClientCachesAndStateTest {
         );
         assertEquals(
                 2222,
-                cache.lookup(key, TransportMode.QUIC).orElseThrow().endpoint().getPort(),
+                cache.lookup(key, TransportMode.QUIC).orElseThrow().address().getPort(),
                 "后写覆盖先写"
         );
         cache.invalidate(key);
@@ -103,7 +255,7 @@ class ClientCachesAndStateTest {
     void successCacheBounded() {
         var cache = new SuccessfulEndpointCache();
         var target = new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("1.2.3.4", 9999)
         );
         IntStream.rangeClosed(1, 1000)

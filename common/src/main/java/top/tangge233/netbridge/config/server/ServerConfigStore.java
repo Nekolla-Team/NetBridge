@@ -1,28 +1,32 @@
 package top.tangge233.netbridge.config.server;
 
+import com.electronwill.nightconfig.core.NullObject;
+import com.electronwill.nightconfig.core.UnmodifiableConfig;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.tangge233.netbridge.transport.KcpProfile;
 
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import org.jspecify.annotations.Nullable;
 
-/**
- * 服务端配置磁盘读写与模板生成（server.toml），基于 NightConfig。
- */
 public record ServerConfigStore(
         Path file
 ) {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerConfigStore.class);
     private static final String TEMPLATE_RESOURCE = "/net-bridge/server-default.toml";
+    private static final Object NO_VALUE = NullObject.NULL_OBJECT;
 
-    /**
-     * 加载 server.toml，如果文件不存在则先从资源模板释放生成默认文件。
-     */
+    private static List<String> append(
+            List<String> prefix,
+            String key
+    ) {
+        return List.of(prefix.getFirst(), key);
+    }
+
     public ServerSettings load() {
         try {
             var parent = file.getParent();
@@ -63,47 +67,240 @@ public record ServerConfigStore(
         }
     }
 
-    private static ServerTransportSettings readSection(
+    private ServerTransportSettings readSection(
             CommentedFileConfig config,
-            String name,
+            String section,
             ServerTransportSettings defaults
     ) {
-        var enable = (Boolean) config.get(List.of(name, "enable"));
-        var bind = (String) config.get(List.of(name, "bind"));
-        var host = (String) config.get(List.of(name, "host"));
-        var port = (Integer) config.get(List.of(name, "port"));
-        var maxConnection = (Integer) config.get(List.of(name, "max_connection"));
-        var profileStr = (String) config.get(List.of(name, "profile"));
+        var prefix = List.of(section);
 
-        var profile = KcpProfile.parse(profileStr);
-        if (profile == null && profileStr != null && !profileStr.isBlank()) {
-            LOGGER.warn(
-                    "Unknown kcp profile '{}' in section '{}', using default",
-                    profileStr,
-                    name
-            );
-        }
+        var enabled = readBoolean(
+                config,
+                prefix,
+                "enable",
+                defaults.enabled(),
+                section
+        );
+        var bindHost = readString(
+                config,
+                prefix,
+                "bind",
+                section
+        );
+        var advertisedHost = readString(
+                config,
+                prefix,
+                "host",
+                section
+        );
+        var port = readInt(
+                config,
+                prefix,
+                "port",
+                defaults.port(),
+                section
+        );
+        var maxConnections = readAtLeast(
+                config,
+                prefix,
+                "max_connection",
+                1,
+                defaults.maxConnections(),
+                section
+        );
+        var profile = readKcpProfile(
+                config,
+                prefix,
+                defaults.kcpProfile(),
+                section
+        );
 
         return new ServerTransportSettings(
-                enable != null
-                        ? enable
-                        : defaults.enabled(),
-                bind != null && !bind.isBlank()
-                        ? bind
-                        : null,
-                host != null && !host.isBlank()
-                        ? host
-                        : null,
-                port != null
-                        ? port
-                        : defaults.port(),
-                maxConnection != null && maxConnection >= 1
-                        ? maxConnection
-                        : defaults.maxConnections(),
-                profile != null
-                        ? profile
-                        : defaults.kcpProfile()
+                enabled,
+                bindHost,
+                advertisedHost,
+                port,
+                maxConnections,
+                profile
         );
+    }
+
+    private boolean readBoolean(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            String key,
+            boolean defaultValue,
+            String section
+    ) {
+        var raw = rawAt(config, prefix, key);
+        return switch (raw) {
+            case null -> defaultValue;
+            case Boolean value -> value;
+            default -> {
+                LOGGER.warn(
+                        "Invalid type for {}.{} in {}: expected boolean; using default",
+                        section,
+                        key,
+                        file
+                );
+                yield defaultValue;
+            }
+        };
+    }
+
+    private @Nullable String readString(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            String key,
+            String section
+    ) {
+        var raw = rawAt(config, prefix, key);
+        return switch (raw) {
+            case null -> null;
+            case String value when !value.isBlank() -> value;
+            case String _ -> null;
+            default -> {
+                LOGGER.warn(
+                        "Invalid type for {}.{} in {}: expected string; using default",
+                        section,
+                        key,
+                        file
+                );
+                yield null;
+            }
+        };
+    }
+
+    private int readInt(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            String key,
+            int defaultValue,
+            String section
+    ) {
+        var raw = rawAt(config, prefix, key);
+        return switch (raw) {
+            case null -> defaultValue;
+            case Number number -> {
+                var value = number.intValue();
+                if (value >= -1 && value <= 65535) {
+                    yield value;
+                }
+
+                LOGGER.warn(
+                        "{}.{} = {} out of range (-1..=65535) in {}; using default",
+                        section,
+                        key,
+                        value,
+                        file
+                );
+                yield defaultValue;
+            }
+            default -> {
+                LOGGER.warn(
+                        "Invalid type for {}.{} in {}: expected integer; using default",
+                        section,
+                        key,
+                        file
+                );
+                yield defaultValue;
+            }
+        };
+    }
+
+    private int readAtLeast(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            String key,
+            int minimum,
+            int defaultValue,
+            String section
+    ) {
+        var raw = rawAt(config, prefix, key);
+        return switch (raw) {
+            case null -> defaultValue;
+            case Number number -> {
+                var value = number.intValue();
+                if (value >= minimum) {
+                    yield value;
+                }
+                LOGGER.warn(
+                        "{}.{} = {} below minimum {} in {}; using default",
+                        section,
+                        key,
+                        value,
+                        minimum,
+                        file
+                );
+                yield defaultValue;
+            }
+            default -> {
+                LOGGER.warn(
+                        "Invalid type for {}.{} in {}: expected integer; using default",
+                        section,
+                        key,
+                        file
+                );
+                yield defaultValue;
+            }
+        };
+    }
+
+    private @Nullable KcpProfile readKcpProfile(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            @Nullable KcpProfile defaultValue,
+            String section
+    ) {
+        var raw = rawAt(config, prefix, "profile");
+        return switch (raw) {
+            case null -> defaultValue;
+            case String text -> {
+                var parsed = KcpProfile.parse(text);
+                if (parsed == null) {
+                    LOGGER.warn(
+                            "Unknown kcp profile '{}' in {}.profile; using default",
+                            text,
+                            section
+                    );
+                    yield defaultValue;
+                }
+                yield parsed;
+            }
+            default -> {
+                LOGGER.warn(
+                        "Invalid type for {}.profile in {}: expected string; using default",
+                        section,
+                        file
+                );
+                yield defaultValue;
+            }
+        };
+    }
+
+    private @Nullable Object rawAt(
+            UnmodifiableConfig config,
+            List<String> prefix,
+            String key
+    ) {
+        Object value;
+        try {
+            value = config.getRaw(append(prefix, key));
+        } catch (Exception e) {
+            LOGGER.warn(
+                    "Failed to read {}.{} in {}: {}",
+                    prefix.isEmpty()
+                            ? ""
+                            : prefix.getFirst(),
+                    key,
+                    file,
+                    e.toString()
+            );
+            return null;
+        }
+        return value == null || NO_VALUE.equals(value)
+                ? null
+                : value;
     }
 
 }

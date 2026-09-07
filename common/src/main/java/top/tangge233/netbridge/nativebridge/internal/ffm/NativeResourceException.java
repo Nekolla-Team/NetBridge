@@ -1,31 +1,34 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
+import org.jspecify.annotations.Nullable;
+
 public final class NativeResourceException extends RuntimeException {
 
-    private final String code;
+    private final NativeResourceError error;
 
-    public NativeResourceException(String codeAndMessage) {
-        super(codeAndMessage);
-        this.code = firstToken(codeAndMessage);
-    }
-
-    private static String firstToken(String message) {
-        var idx = message.indexOf(' ');
-        return idx <= 0
-                ? message
-                : message.substring(0, idx);
+    public NativeResourceException(
+            NativeResourceError error,
+            String message
+    ) {
+        super(message);
+        this.error = error;
     }
 
     public NativeResourceException(
-            String codeAndMessage,
-            Throwable cause
+            NativeResourceError error,
+            String message,
+            @Nullable Throwable cause
     ) {
-        super(codeAndMessage, cause);
-        this.code = firstToken(codeAndMessage);
+        super(message, cause);
+        this.error = error;
+    }
+
+    public NativeResourceError error() {
+        return error;
     }
 
     public String code() {
-        return code;
+        return error.name();
     }
 
 }

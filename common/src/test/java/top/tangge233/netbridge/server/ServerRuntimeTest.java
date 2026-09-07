@@ -7,16 +7,17 @@ import top.tangge233.netbridge.nativebridge.NativeConnectRequest;
 import top.tangge233.netbridge.nativebridge.NativeConnection;
 import top.tangge233.netbridge.nativebridge.UnavailableNativeTransportBackend;
 import top.tangge233.netbridge.nativebridge.fake.FakeNativeTransportBackend;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 
 import java.nio.file.Path;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.jspecify.annotations.Nullable;
 
 import static org.junit.jupiter.api.Assertions.*;
+
+import static java.util.Objects.requireNonNull;
 
 class ServerRuntimeTest {
 
@@ -30,7 +31,7 @@ class ServerRuntimeTest {
             assertTrue(runtime.isRunning());
             var entries = runtime.announcement().entries();
             assertFalse(entries.isEmpty());
-            var quic = Objects.requireNonNull(entries.get("quic"));
+            var quic = requireNonNull(entries.get(AcceleratedTransport.QUIC));
             assertEquals(25565, quic.port());
         }
     }
@@ -77,7 +78,9 @@ class ServerRuntimeTest {
             assertTrue(runtime.start(25565, null));
             assertEquals(
                     25565,
-                    Objects.requireNonNull(runtime.announcement().entries().get("quic")).port()
+                    requireNonNull(runtime.announcement()
+                            .entries()
+                            .get(AcceleratedTransport.QUIC)).port()
             );
             runtime.stop();
             assertFalse(runtime.isRunning());
@@ -85,7 +88,9 @@ class ServerRuntimeTest {
             assertTrue(runtime.start(25566, null));
             assertEquals(
                     25566,
-                    Objects.requireNonNull(runtime.announcement().entries().get("quic")).port()
+                    requireNonNull(runtime.announcement()
+                            .entries()
+                            .get(AcceleratedTransport.QUIC)).port()
             );
             runtime.stop();
             assertFalse(runtime.isRunning());
@@ -196,7 +201,6 @@ class ServerRuntimeTest {
                 sessionBLatch.countDown();
             });
             assertTrue(runtime.start(25566, null));
-            var genB = sessionBGeneration.get();
             assertFalse(
                     runtime.isSessionValid(genA),
                     "Stale generation A must still be invalid when session B is running"
@@ -206,7 +210,7 @@ class ServerRuntimeTest {
                     NativeConnectRequest.quic("127.0.0.1", 25566)
             );
             assertTrue(sessionBLatch.await(3, TimeUnit.SECONDS));
-            genB = sessionBGeneration.get();
+            var genB = sessionBGeneration.get();
             assertNotNull(genB);
             assertNotEquals(genA, genB);
             assertTrue(

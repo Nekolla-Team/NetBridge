@@ -29,21 +29,27 @@
 
 ## 客户端连接
 
-| 现象                                    | 诊断与处置                                                                                                                     |
-|-----------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| 直接连 TCP（无加速尝试）                | F3/日志显示 `Transport for <addr>: TCP (mode=tcp)`：客户端 mode 为 tcp；或目标服务器未宣告所选传输/协议版本不支持。            |
-| `Handshake to ... failed (attempt 1/2)` | 加速握手失败（黑洞/丢包/版本不匹配）。第 2 次失败自动回退 TCP；确认服务端端口可达（UDP）且两端 mod 版本一致。                  |
-| 频繁回退 TCP                            | 排查 UDP 链路质量（QUIC/KCP 均走 UDP）；KCP 可试 `profile = "aggressive"`（高丢包链路）。成功过的端点会缓存 5 分钟以跳过协商。 |
-| 连接成功但无 F3 协议行                  | F3 行仅在 net-bridge 加速连接激活时显示；TCP 直连无该行（正常）。                                                              |
+| 现象                                    | 诊断与处置                                                                                                                              |
+|-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| 直接连 TCP（无加速尝试）                | F3/日志显示 `Transport for <addr>: TCP (mode=tcp)`：客户端 mode 为 tcp；或目标服务器未宣告所选传输/协议版本不支持。                     |
+| `Handshake to ... failed (attempt 1/2)` | 加速握手失败（黑洞/丢包/版本不匹配）。第 2 次失败自动回退 TCP；确认服务端端口可达（UDP）且两端 mod 版本一致。                           |
+| 频繁回退 TCP                            | 排查 UDP 链路质量（QUIC/KCP 均走 UDP）；KCP 可试 `profile = "aggressive"`（高丢包链路）。成功过的端点会缓存 5 分钟以跳过协商。          |
+| 服务端已宣告但客户端仍走 TCP            | 远端 `networks` JSON 畸形/超长会被客户端 codec 安全降级为空能力（不崩溃、不误报）；核对服务端是否把网络块截断或漏发 `protocol` 版本串。 |
+| 连接成功但无 F3 协议行                  | F3 行仅在 net-bridge 加速连接激活时显示；TCP 直连无该行（正常）。                                                                       |
 
 ## 开发者
 
-- 缓存目录损坏/权限：错误码 `CACHE_UNWRITABLE`；可用
+- 缓存目录损坏/权限：`NativeResourceException`（错误码 `CACHE_UNWRITABLE`）；可用
   `-Dnetbridge.native.cache.dir=<dir>` 重定向缓存根。损坏条目自动复验并原子替换。
 - 平台不支持：错误码 `UNSUPPORTED_PLATFORM`（附 normalized os/arch）。
 - 本地调试 native：`-Dnetbridge.native.path=/abs/path/libnet_bridge_native.so`
   （优先于打包资源；生产无 `java.library.path` 回退）。
+- 系统属性（transport/quicPort/native.path/cache.dir）仅由 `NetBridgeProperties` 集中解析并经
+  组合根注入，新增属性不得在业务代码里散读 `System.getProperty`。
 - 构建验证：`./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest`。
+- 打包验证：`./gradlew fabric:verifyFabricPackaging neoforge:verifyNeoForgePackaging`
+  （断言 jackson-core 恰一份、零 databind、nightconfig 存在、native manifest+库齐全、 META-INF
+  无签名残留）；若报重复 `tools.jackson.*` 或 `META-INF` 冲突，说明某处 embed 了 二次打包/整目录排除被移除。
 - native 集成测试：`./gradlew :common:nativeIntegrationTest`（自带
   `--enable-native-access=ALL-UNNAMED` 与 `--illegal-native-access=deny`）。
 - 基准测试：`./gradlew :common:ffmBenchmark`，说明见 `docs/benchmarks/ffm-baseline.md`。

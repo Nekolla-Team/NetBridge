@@ -7,11 +7,11 @@ import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
 import top.tangge233.netbridge.nativebridge.NativeTransportBackend;
 import top.tangge233.netbridge.nativebridge.UnavailableNativeTransportBackend;
-import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
 import top.tangge233.netbridge.server.ServerRuntime;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.jspecify.annotations.Nullable;
 
 public final class NetBridgeRuntime implements AutoCloseable {
 
@@ -29,12 +29,28 @@ public final class NetBridgeRuntime implements AutoCloseable {
             ServerConfigStore serverConfigStore,
             NativeTransportBackend nativeBackend
     ) {
+        this(
+                configPaths,
+                clientSettings,
+                serverConfigStore,
+                nativeBackend,
+                null
+        );
+    }
+
+    public NetBridgeRuntime(
+            ConfigPaths configPaths,
+            ClientSettingsService clientSettings,
+            ServerConfigStore serverConfigStore,
+            NativeTransportBackend nativeBackend,
+            @Nullable Integer quicPortOverride
+    ) {
         this.configPaths = configPaths;
         this.clientSettings = clientSettings;
         this.serverConfigStore = serverConfigStore;
         this.nativeBackend = nativeBackend;
         this.clientRuntime = new ClientRuntime(clientSettings, nativeBackend);
-        this.serverRuntime = new ServerRuntime(nativeBackend, serverConfigStore);
+        this.serverRuntime = new ServerRuntime(nativeBackend, serverConfigStore, quicPortOverride);
     }
 
     public State state() {
@@ -79,30 +95,28 @@ public final class NetBridgeRuntime implements AutoCloseable {
         try {
             serverRuntime.close();
         } catch (Throwable t) {
-            NetBridge.LOGGER.warn("Error closing server runtime: {}", t.getMessage());
+            NetBridge.LOGGER.warn("Error closing server runtime", t);
             errors.add(t);
         }
 
         try {
             clientRuntime.close();
         } catch (Throwable t) {
-            NetBridge.LOGGER.warn("Error closing client runtime: {}", t.getMessage());
+            NetBridge.LOGGER.warn("Error closing client runtime", t);
             errors.add(t);
         }
 
         try {
             nativeBackend.close();
         } catch (Throwable t) {
-            NetBridge.LOGGER.warn("Error closing native backend: {}", t.getMessage());
+            NetBridge.LOGGER.warn("Error closing native backend", t);
             errors.add(t);
         }
 
         if (!errors.isEmpty()) {
             state = State.CLOSE_FAILED;
-            var primary = new NativeResourceException("Failed to close NetBridgeRuntime cleanly");
-            for (var err : errors) {
-                primary.addSuppressed(err);
-            }
+            var primary = new RuntimeException("Failed to close NetBridgeRuntime cleanly");
+            errors.forEach(primary::addSuppressed);
             throw primary;
         }
 

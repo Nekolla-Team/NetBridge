@@ -36,6 +36,5 @@ tasks.withType<JavaCompile>().configureEach {
             excludedFieldAnnotations.add("org.spongepowered.asm.mixin.Shadow")
         }
         error("RequireExplicitNullMarking")
-        disable("UnusedMethod", "UnusedVariable")
     }
 }

@@ -4,11 +4,13 @@ import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.ability.NetworksAbility;
 import top.tangge233.netbridge.ability.NetworksEntry;
 import top.tangge233.netbridge.config.client.ClientSettings;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 import top.tangge233.netbridge.transport.KcpProfile;
 import top.tangge233.netbridge.transport.TransportMode;
 import top.tangge233.netbridge.transport.TransportTarget;
 
 import java.net.InetSocketAddress;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -30,7 +32,7 @@ class ConnectionPlannerTest {
                 Optional.empty(),
                 true
         );
-        assertTrue(plan.nativeAttempt().isEmpty());
+        assertInstanceOf(TcpPlan.class, plan);
     }
 
     private static InetSocketAddress addr(int port) {
@@ -50,36 +52,38 @@ class ConnectionPlannerTest {
                 Optional.empty(),
                 false
         );
-        assertTrue(plan.nativeAttempt().isEmpty());
+        assertInstanceOf(TcpPlan.class, plan);
     }
 
     @Test
-    void unadvertisedServerPlansTcp() {
+    void unadvertisedOrUnusableServerPlansTcp() {
         var settings = new ClientSettings(
                 TransportMode.QUIC,
                 KcpProfile.BALANCE
         );
-        assertTrue(planner.plan(
-                addr(25565),
-                settings,
-                NetworksAbility.empty(),
-                Optional.empty(),
-                true
-        ).nativeAttempt().isEmpty());
+        assertInstanceOf(
+                TcpPlan.class, planner.plan(
+                        addr(25565),
+                        settings,
+                        NetworksAbility.empty(),
+                        Optional.empty(),
+                        true
+                )
+        );
 
-        var wrongProtocol = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                25565,
-                "net-bri-quic/99"
+        // Transport advertised but explicitly disabled -> not usable.
+        var disabled = NetworksAbility.of(Map.of(
+                AcceleratedTransport.QUIC, new NetworksEntry(false, null, 25565)
         ));
-        assertTrue(planner.plan(
-                addr(25565),
-                settings,
-                wrongProtocol,
-                Optional.empty(),
-                true
-        ).nativeAttempt().isEmpty());
+        assertInstanceOf(
+                TcpPlan.class, planner.plan(
+                        addr(25565),
+                        settings,
+                        disabled,
+                        Optional.empty(),
+                        true
+                )
+        );
     }
 
     @Test
@@ -88,12 +92,7 @@ class ConnectionPlannerTest {
                 TransportMode.QUIC,
                 KcpProfile.BALANCE
         );
-        var advertised = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                2443,
-                "net-bri-quic/1"
-        ));
+        var advertised = quicAt(2443);
         var plan = planner.plan(
                 addr(25565),
                 settings,
@@ -101,16 +100,21 @@ class ConnectionPlannerTest {
                 Optional.empty(),
                 true
         );
-        var attempt = plan.nativeAttempt().orElseThrow();
-        assertEquals(
-                TransportMode.QUIC,
-                attempt.mode()
-        );
+        assertInstanceOf(AcceleratedPlan.class, plan);
+        var attempt = ((AcceleratedPlan) plan).nativeAttempt();
+        assertInstanceOf(QuicAttempt.class, attempt);
+        var quic = (QuicAttempt) attempt;
         assertEquals(
                 2443,
-                attempt.endpoint().getPort()
+                quic.endpoint().getPort()
         );
-        assertTrue(attempt.endpoint().getHostString().startsWith("203.0.113."));
+        assertTrue(quic.endpoint().getHostString().startsWith("203.0.113."));
+    }
+
+    private static NetworksAbility quicAt(int port) {
+        return NetworksAbility.of(Map.of(
+                AcceleratedTransport.QUIC, new NetworksEntry(true, null, port)
+        ));
     }
 
     @Test
@@ -119,27 +123,20 @@ class ConnectionPlannerTest {
                 TransportMode.KCP,
                 KcpProfile.BALANCE
         );
-        var advertised = NetworksAbility.of(
-                new NetworksEntry(
-                        true,
-                        null,
-                        2443,
-                        "net-bri-quic/1"
-                ),
-                new NetworksEntry(
-                        true,
-                        null,
-                        2444,
-                        "net-bri-kcp/1"
-                )
-        );
-        var attempt = planner.plan(
+        var advertised = NetworksAbility.of(Map.of(
+                AcceleratedTransport.QUIC, new NetworksEntry(true, null, 2443),
+                AcceleratedTransport.KCP, new NetworksEntry(true, null, 2444)
+        ));
+        var plan = planner.plan(
                 addr(25565),
                 settings,
                 advertised,
                 Optional.empty(),
                 true
-        ).nativeAttempt().orElseThrow();
+        );
+        assertInstanceOf(AcceleratedPlan.class, plan);
+        var attempt = ((AcceleratedPlan) plan).nativeAttempt();
+        assertInstanceOf(KcpAttempt.class, attempt);
         assertEquals(
                 2444,
                 attempt.endpoint().getPort()
@@ -152,64 +149,63 @@ class ConnectionPlannerTest {
                 TransportMode.QUIC,
                 KcpProfile.BALANCE
         );
-        var advertised = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                2443,
-                "net-bri-quic/1"
-        ));
+        var advertised = quicAt(2443);
         var recent = Optional.of(new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("1.2.3.4", 9999)
         ));
-        var attempt = planner.plan(
+        var plan = planner.plan(
                 addr(25565),
                 settings,
                 advertised,
                 recent,
                 true
-        ).nativeAttempt().orElseThrow();
+        );
+        assertInstanceOf(AcceleratedPlan.class, plan);
+        var attempt = ((AcceleratedPlan) plan).nativeAttempt();
+        assertInstanceOf(QuicAttempt.class, attempt);
+        var quic = (QuicAttempt) attempt;
         assertEquals(
                 9999,
-                attempt.endpoint().getPort()
+                quic.endpoint().getPort()
         );
         assertEquals(
                 "1.2.3.4",
-                attempt.endpoint().getHostString()
+                quic.endpoint().getHostString()
         );
     }
 
     @Test
-    void recentSuccessIgnoredWhenModeDiffers() {
+    void recentSuccessIgnoredWhenTransportDiffers() {
         var settings = new ClientSettings(
                 TransportMode.KCP,
                 KcpProfile.BALANCE
         );
-        var advertised = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                2444,
-                "net-bri-kcp/1"
-        ));
+        var advertised = kcpAt(2444);
         var recent = Optional.of(new TransportTarget(
-                TransportMode.QUIC,
+                AcceleratedTransport.QUIC,
                 new InetSocketAddress("1.2.3.4", 9999)
         ));
-        var attempt = planner.plan(
+        var plan = planner.plan(
                 addr(25565),
                 settings,
                 advertised,
                 recent,
                 true
-        ).nativeAttempt().orElseThrow();
-        assertEquals(
-                TransportMode.KCP,
-                attempt.mode()
         );
+        assertInstanceOf(AcceleratedPlan.class, plan);
+        var attempt = ((AcceleratedPlan) plan).nativeAttempt();
+        assertInstanceOf(KcpAttempt.class, attempt);
         assertEquals(
                 2444,
                 attempt.endpoint().getPort()
         );
+    }
+
+    private static NetworksAbility kcpAt(int port) {
+        return NetworksAbility.of(Map.of(
+                AcceleratedTransport.KCP, new NetworksEntry(true, null, port)
+        ));
     }
 
     @Test
@@ -218,22 +214,20 @@ class ConnectionPlannerTest {
                 TransportMode.KCP,
                 KcpProfile.AGGRESSIVE
         );
-        var advertised = NetworksAbility.of(new NetworksEntry(
-                true,
-                null,
-                2444,
-                "net-bri-kcp/1"
-        ));
-        var attempt = planner.plan(
+        var advertised = kcpAt(2444);
+        var plan = planner.plan(
                 addr(25565),
                 settings,
                 advertised,
                 Optional.empty(),
                 true
-        ).nativeAttempt().orElseThrow();
+        );
+        assertInstanceOf(AcceleratedPlan.class, plan);
+        var attempt = ((AcceleratedPlan) plan).nativeAttempt();
+        assertInstanceOf(KcpAttempt.class, attempt);
         assertEquals(
                 KcpProfile.AGGRESSIVE,
-                attempt.kcpProfile()
+                ((KcpAttempt) attempt).profile()
         );
     }
 

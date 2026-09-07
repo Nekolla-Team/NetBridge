@@ -58,7 +58,7 @@ public final class FfmNativeConnection implements NativeConnection {
                 return NativeConnectionState.CLOSED;
             }
 
-            var mapped = NativeConnectionState.fromAbi(abi);
+            var mapped = FfmAbiCodec.connectionStateFromAbi(abi);
             state = mapped;
             return mapped;
         }

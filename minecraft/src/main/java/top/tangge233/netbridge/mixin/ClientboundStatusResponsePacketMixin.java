@@ -1,6 +1,5 @@
 package top.tangge233.netbridge.mixin;
 
-import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
@@ -13,6 +12,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 import top.tangge233.netbridge.ability.StatusNetworksCapture;
 import top.tangge233.netbridge.ability.StatusNetworksCodec;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(ClientboundStatusResponsePacket.class)
 public abstract class ClientboundStatusResponsePacketMixin {
 
@@ -24,12 +24,17 @@ public abstract class ClientboundStatusResponsePacketMixin {
                             "Lnet/minecraft/network/FriendlyByteBuf;readJsonWithCodec(Lcom/mojang/serialization/Codec;)Ljava/lang/Object;"
             )
     )
-    private static <T> T netbridge$captureNetworks(FriendlyByteBuf buf, Codec<T> codec) {
+    private static <T> T netbridge$captureNetworks(
+            FriendlyByteBuf buf,
+            Codec<T> codec
+    ) {
         var json = buf.readUtf();
+        StatusNetworksCapture.capture(StatusNetworksCodec.parse(json));
         var element = JsonParser.parseString(json);
-        StatusNetworksCapture.capture(StatusNetworksCodec.parse(element));
         return codec.parse(JsonOps.INSTANCE, element)
-                .getOrThrow(message -> new DecoderException("Failed to decode json: " + message));
+                .getOrThrow(message ->
+                        new DecoderException("Failed to decode json: " + message)
+                );
     }
 
 }

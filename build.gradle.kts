@@ -1,4 +1,8 @@
+import org.gradle.internal.os.OperatingSystem.current
 import top.tangge233.netbridge.build.BuildNativeLibrary
+import top.tangge233.netbridge.build.NativePlatform.cdylibName
+import top.tangge233.netbridge.build.NativePlatform.subdir
+import java.security.MessageDigest
 
 plugins {
     id("netbridge.java-conventions") apply false
@@ -11,16 +15,14 @@ allprojects {
     version = property("modVersion").toString()
 }
 
-val nativeProfileProperty =
-    providers
-            .gradleProperty("nativeProfile")
-            .orElse("debug")
+val nativeProfileProperty = providers
+        .gradleProperty("nativeProfile")
+        .orElse("debug")
 
-val skipNativeBuildProperty =
-    providers
-            .gradleProperty("skipNativeBuild")
-            .map { true }
-            .orElse(false)
+val skipNativeBuildProperty = providers
+        .gradleProperty("skipNativeBuild")
+        .map { true }
+        .orElse(false)
 
 tasks.register<BuildNativeLibrary>("buildCdylib") {
     group = "build"
@@ -67,55 +69,47 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
 
     doLast {
         val dir = nativeDir.get().asFile
+        val header = rootDir
+                .resolve("rust/crates/net-bridge-native/include/netbridge.h")
+                .readText()
 
-        val header =
-            rootDir
-                    .resolve("rust/crates/net-bridge-native/include/netbridge.h")
-                    .readText()
+        val abiMajor = Regex("#define\\s+NB_ABI_MAJOR\\s+(\\d+)")
+                .find(header)
+                ?.groupValues
+                ?.get(1)
+            ?: throw GradleException("NB_ABI_MAJOR not found in netbridge.h")
 
-        val abiMajor =
-            Regex("#define\\s+NB_ABI_MAJOR\\s+(\\d+)")
-                    .find(header)
-                    ?.groupValues
-                    ?.get(1)
-                ?: throw GradleException("NB_ABI_MAJOR not found in netbridge.h")
+        val abiMinor = Regex("#define\\s+NB_ABI_MINOR\\s+(\\d+)")
+                .find(header)
+                ?.groupValues
+                ?.get(1)
+            ?: throw GradleException("NB_ABI_MINOR not found in netbridge.h")
 
-        val abiMinor =
-            Regex("#define\\s+NB_ABI_MINOR\\s+(\\d+)")
-                    .find(header)
-                    ?.groupValues
-                    ?.get(1)
-                ?: throw GradleException("NB_ABI_MINOR not found in netbridge.h")
+        val cargoToml = rootDir
+                .resolve("rust/crates/net-bridge-native/Cargo.toml")
+                .readText()
 
-        val cargoToml =
-            rootDir
-                    .resolve("rust/crates/net-bridge-native/Cargo.toml")
-                    .readText()
+        val rustVersion = Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"")
+                .find(cargoToml)
+                ?.groupValues
+                ?.get(1)
+            ?: throw GradleException(
+                "package version not found in net-bridge-native Cargo.toml"
+            )
 
-        val rustVersion =
-            Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"")
-                    .find(cargoToml)
-                    ?.groupValues
-                    ?.get(1)
-                ?: throw GradleException(
-                    "package version not found in net-bridge-native Cargo.toml"
-                )
-
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val digest = MessageDigest.getInstance("SHA-256")
         var written = 0
 
         dir.listFiles { file: File -> file.isDirectory }
                 ?.sortedBy { it.name }
                 ?.forEach { platform ->
-                    val lib =
-                        platform.listFiles { file: File ->
-                            file.isFile &&
-                                    (
-                                            file.name.startsWith("libnet_bridge_native") ||
-                                                    file.name == "net_bridge_native.dll"
-                                            )
-                        }?.firstOrNull()
-                            ?: return@forEach
+                    val lib = platform.listFiles { file: File ->
+                        file.isFile &&
+                                (
+                                        file.name.startsWith("libnet_bridge_native") ||
+                                                file.name == "net_bridge_native.dll"
+                                        )
+                    }?.firstOrNull() ?: return@forEach
 
                     digest.reset()
 
@@ -128,10 +122,9 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
                         }
                     }
 
-                    val sha =
-                        digest
-                                .digest()
-                                .joinToString("") { "%02x".format(it) }
+                    val sha = digest
+                            .digest()
+                            .joinToString("") { "%02x".format(it) }
 
                     platform.resolve("manifest.json").writeText(
                         """
@@ -169,36 +162,33 @@ val verifyNativeSymbols = tasks.register("verifyNativeSymbols") {
     dependsOn(tasks.named("buildCdylib"))
 
     onlyIf {
-        org.gradle.internal.os.OperatingSystem.current().isLinux ||
-                org.gradle.internal.os.OperatingSystem.current().isMacOsX
+        current().isLinux || current().isMacOsX
     }
 
     doLast {
-        val lib =
-            layout.buildDirectory
-                    .dir("native")
-                    .get()
-                    .asFile
-                    .resolve(top.tangge233.netbridge.build.NativePlatform.subdir)
-                    .resolve(top.tangge233.netbridge.build.NativePlatform.cdylibName)
+        val lib = layout.buildDirectory
+                .dir("native")
+                .get()
+                .asFile
+                .resolve(subdir)
+                .resolve(cdylibName)
 
         if (!lib.exists()) {
             throw GradleException("staged cdylib not found: $lib")
         }
 
-        val exported =
-            providers.exec {
-                commandLine("nm", "-D", lib.absolutePath)
-            }.standardOutput
-                    .asText
-                    .get()
-                    .lineSequence()
-                    .filter { it.contains(" T ") }
-                    .map { it.substringAfterLast(' ').trim() }
-                    .filter { it.isNotEmpty() }
-                    .filter { !it.startsWith("_") }
-                    .filter { !it.startsWith("__") }
-                    .toList()
+        val exported = providers.exec {
+            commandLine("nm", "-D", lib.absolutePath)
+        }.standardOutput
+                .asText
+                .get()
+                .lineSequence()
+                .filter { it.contains(" T ") }
+                .map { it.substringAfterLast(' ').trim() }
+                .filter { it.isNotEmpty() }
+                .filter { !it.startsWith("_") }
+                .filter { !it.startsWith("__") }
+                .toList()
 
         val expected = setOf("netbridge_get_api")
         val unexpected = exported - expected
@@ -231,37 +221,37 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
                 if (dir.isDirectory) {
                     dir.walkTopDown()
-                            .filter {
-                                it.isFile && it.name.endsWith(".java")
-                            }
+                            .filter { it.isFile && it.name.endsWith(".java") }
                             .toList()
                 } else {
                     emptyList()
                 }
             }
 
-        val production =
-            javaMainSources(
-                "common/src/main/java",
-                "minecraft/src/main/java",
-                "fabric/src/main/java",
-                "neoforge/src/main/java"
-            )
+        val production = javaMainSources(
+            "common/src/main/java",
+            "minecraft/src/main/java",
+            "fabric/src/main/java",
+            "neoforge/src/main/java"
+        )
 
         val ffmAllowlistPrefix =
             "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/"
 
-        val runtimeAllowlist =
-            setOf(
-                "common/src/main/java/top/tangge233/netbridge/runtime/NetBridgeServices.java"
-            )
+        val runtimeAllowlist = setOf(
+            "common/src/main/java/top/tangge233/netbridge/runtime/NetBridgeServices.java"
+        )
 
-        val mixinGuardAllowlist =
-            setOf(
-                "minecraft/src/main/java/top/tangge233/netbridge/mixin/ConnectionMixin.java",
-                "minecraft/src/main/java/top/tangge233/netbridge/mc/NativeClientTransport.java",
-                "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
-            )
+        val mixinGuardAllowlist = setOf(
+            "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
+        )
+
+        // Jackson Core may only be imported by the two NetBridge JSON codecs; Gson may
+        // only be imported in the shared Minecraft adapter layer (Mojang boundary).
+        val jsonCodecAllowlist = setOf(
+            "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCodec.java",
+            "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/NativeManifestCodec.java"
+        )
 
         for (file in production) {
             val rel = file.relativeTo(rootDir).path.replace('\\', '/')
@@ -285,10 +275,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                 )
             }
 
-            if (
-                Regex("public\\s+static\\s+native\\s")
-                        .containsMatchIn(text)
-            ) {
+            if (Regex("public\\s+static\\s+native\\s").containsMatchIn(text)) {
                 failures.add(
                     "$rel: Java native method declarations are forbidden"
                 )
@@ -336,6 +323,46 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                     "$rel: static executor/thread-local outside the allowlist"
                 )
             }
+
+            if (
+                text.contains("import tools.jackson") &&
+                rel !in jsonCodecAllowlist
+            ) {
+                failures.add(
+                    "$rel: tools.jackson import outside the JSON codec boundary"
+                )
+            }
+
+            if (
+                text.contains("tools.jackson.databind") ||
+                text.contains("ObjectMapper")
+            ) {
+                failures.add(
+                    "$rel: Jackson Databind/ObjectMapper is forbidden (Core streaming only)"
+                )
+            }
+
+            if (
+                text.contains("import com.google.gson") &&
+                !rel.startsWith("minecraft/")
+            ) {
+                failures.add(
+                    "$rel: com.google.gson import allowed only in the Minecraft adapter layer"
+                )
+            }
+
+            if (
+                text.contains(
+                    "import top.tangge233.netbridge.nativebridge.internal.ffm."
+                ) &&
+                rel !in runtimeAllowlist &&
+                !rel.startsWith(ffmAllowlistPrefix)
+            ) {
+                failures.add(
+                    "$rel: reaching into nativebridge.internal.ffm from outside " +
+                            "the FFM layer (composition root only)"
+                )
+            }
         }
 
         val common = javaMainSources("common/src/main/java")
@@ -366,12 +393,11 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             }
         }
 
-        val loaderDupDirs =
-            listOf(
-                "fabric/src/main/java/top/tangge233/netbridge/fabric/mc",
-                "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mc",
-                "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mixin"
-            )
+        val loaderDupDirs = listOf(
+            "fabric/src/main/java/top/tangge233/netbridge/fabric/mc",
+            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mc",
+            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mixin"
+        )
 
         for (dir in loaderDupDirs) {
             if (rootDir.resolve(dir).isDirectory) {
@@ -382,11 +408,10 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             }
         }
 
-        val pkgRoots =
-            listOf(
-                "common/src/main/java/top/tangge233/netbridge",
-                "minecraft/src/main/java/top/tangge233/netbridge"
-            )
+        val pkgRoots = listOf(
+            "common/src/main/java/top/tangge233/netbridge",
+            "minecraft/src/main/java/top/tangge233/netbridge"
+        )
 
         for (rootPath in pkgRoots) {
             val root = rootDir.resolve(rootPath)
@@ -395,24 +420,22 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                 continue
             }
 
-            val packages =
-                root.walkTopDown()
-                        .filter {
-                            it.isDirectory &&
-                                    it.listFiles { file: File ->
-                                        file.name.endsWith(".java")
-                                    }?.isNotEmpty() == true
-                        }
-                        .toList()
+            val packages = root.walkTopDown()
+                    .filter {
+                        it.isDirectory &&
+                                it.listFiles { file: File ->
+                                    file.name.endsWith(".java")
+                                }?.isNotEmpty() == true
+                    }
+                    .toList()
 
             for (pkg in packages) {
                 val hasInfo = pkg.resolve("package-info.java").isFile
 
                 if (!hasInfo) {
-                    val rel =
-                        pkg.relativeTo(rootDir)
-                                .path
-                                .replace('\\', '/')
+                    val rel = pkg.relativeTo(rootDir)
+                            .path
+                            .replace('\\', '/')
 
                     failures.add(
                         "$rel: missing package-info.java (@NullMarked required)"
@@ -433,9 +456,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
         if (coreSrc.isDirectory) {
             coreSrc.walkTopDown()
-                    .filter {
-                        it.isFile && it.name.endsWith(".rs")
-                    }
+                    .filter { it.isFile && it.name.endsWith(".rs") }
                     .forEach { file ->
                         val rel = file.relativeTo(rootDir).path.replace('\\', '/')
                         val text = file.readText()
@@ -485,9 +506,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                         }
 
                         if (
-                            rel.startsWith(
-                                "rust/crates/net-bridge-core/src/transport/"
-                            ) &&
+                            rel.startsWith("rust/crates/net-bridge-core/src/transport/") &&
                             !rel.contains("tests") &&
                             text.contains("tokio::spawn")
                         ) {
@@ -498,8 +517,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                     }
         }
 
-        val coreCargo =
-            rootDir.resolve("rust/crates/net-bridge-core/Cargo.toml")
+        val coreCargo = rootDir.resolve("rust/crates/net-bridge-core/Cargo.toml")
 
         if (coreCargo.readText().contains("jni")) {
             failures.add(
@@ -516,8 +534,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         }
 
         logger.lifecycle(
-            "architecture verification OK " +
-                    "(${production.size} java files scanned)"
+            "architecture verification OK (${production.size} java files scanned)"
         )
     }
 }
@@ -562,15 +579,11 @@ tasks.register<Copy>("assembleAll") {
     dependsOn(verifyArchitecture)
 
     from(fabricJarConfig) {
-        rename {
-            "net-bridge-fabric-${project.version}.jar"
-        }
+        rename { "net-bridge-fabric-${project.version}.jar" }
     }
 
     from(neoforgeJarConfig) {
-        rename {
-            "net-bridge-neoforge-${project.version}.jar"
-        }
+        rename { "net-bridge-neoforge-${project.version}.jar" }
     }
 
     into(layout.buildDirectory.dir("libs"))
@@ -581,8 +594,6 @@ tasks.register("printVersions") {
         val mcVer = libs.versions.minecraft.get()
         val neoVer = libs.versions.neoforge.asProvider().get()
 
-        println(
-            "Minecraft: $mcVer (NeoForge $neoVer / Fabric $mcVer)"
-        )
+        println("Minecraft: $mcVer (NeoForge $neoVer / Fabric $mcVer)")
     }
 }

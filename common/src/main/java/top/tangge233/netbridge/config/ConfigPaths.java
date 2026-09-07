@@ -2,14 +2,20 @@ package top.tangge233.netbridge.config;
 
 import java.nio.file.Path;
 
+import static java.util.Objects.requireNonNull;
+
 /**
- * NetBridge 配置文件路径解析。
+ * Resolves the NetBridge configuration file path.
  *
- * @param directory 配置根目录（例如 .minecraft/config/net-bridge）
+ * @param directory Configuration root directory (e.g. .minecraft/config/net-bridge)
  */
 public record ConfigPaths(
         Path directory
 ) {
+
+    public ConfigPaths {
+        requireNonNull(directory, "directory");
+    }
 
     public Path clientFile() {
         return directory.resolve("client.toml");

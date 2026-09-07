@@ -3,22 +3,19 @@ package top.tangge233.netbridge.mixin;
 import io.netty.channel.ChannelFuture;
 import net.minecraft.network.Connection;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.netbridge.NetBridge;
+import top.tangge233.netbridge.client.AccelerationInterceptionScope;
 import top.tangge233.netbridge.mc.NativeClientTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(Connection.class)
 public abstract class ConnectionMixin {
-
-    @Unique
-    private static final ThreadLocal<Boolean> NETBRIDGE_IN_PROGRESS =
-            ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     @Inject(
             method = "connect",
@@ -31,7 +28,9 @@ public abstract class ConnectionMixin {
             Connection connection,
             CallbackInfoReturnable<ChannelFuture> cir
     ) {
-        if (NativeClientTransport.isVanillaBypass() || NETBRIDGE_IN_PROGRESS.get()) {
+        if (AccelerationInterceptionScope.isVanillaConnectBypass()
+                || AccelerationInterceptionScope.isAcceleratedConnectInProgress()
+        ) {
             return;
         }
 
@@ -40,19 +39,15 @@ public abstract class ConnectionMixin {
             return;
         }
 
-        NETBRIDGE_IN_PROGRESS.set(Boolean.TRUE);
-
-        try {
-            cir.setReturnValue(
-                    NativeClientTransport.connectWithFallback(
-                            address,
-                            useEpoll,
-                            connection
-                    )
-            );
-        } finally {
-            NETBRIDGE_IN_PROGRESS.remove();
-        }
+        cir.setReturnValue(
+                AccelerationInterceptionScope.callWithAcceleratedConnectInProgress(
+                        () -> NativeClientTransport.connectWithFallback(
+                                address,
+                                useEpoll,
+                                connection
+                        )
+                )
+        );
     }
 
 }

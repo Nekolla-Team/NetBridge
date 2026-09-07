@@ -182,14 +182,6 @@ public final class FfmNativeLibrary implements AutoCloseable {
         }
     }
 
-    private void ensureOpen() {
-        synchronized (stateLock) {
-            if (state != State.OPEN) {
-                throw new IllegalStateException("FfmNativeLibrary is " + state);
-            }
-        }
-    }
-
     public State state() {
         synchronized (stateLock) {
             return state;

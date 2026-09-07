@@ -3,6 +3,11 @@
 > 本文件描述 JNI 时代的旧重构里程碑， **已被 `NETBRIDGE_JAVA25_FFM_FULL_REFACTOR_PLAN.md`
 > （Java 25 + FFM 全量重构）取代**，仅作历史记录保留；现行架构见 `docs/glossary.md` 与
 > `docs/adr/0009~0011`。
+>
+> 2026-09 后续一轮 **Java 域模型现代化**（JSON 边界、传输域类型化、sealed 计划/请求/事件、
+> FFM ABI 数值隔离、ScopedValue/Duration/单调时钟、受控配置与错误、`FfmCallGate` 抽取）见
+> `NETBRIDGE_JAVA_MODERNIZATION_IMPLEMENTATION_PLAN.md`，决议见 `docs/adr/0012`；其中
+> `DelegatingChannelFuture` 受控 POC 结论为 **REJECT（保留自研实现）**。
 
 
 依据：docs/adr/0001~0007 · docs/glossary.md · docs/conventions.md。 顺序即依赖序；每里程碑含验收标准，全绿才进下一个。

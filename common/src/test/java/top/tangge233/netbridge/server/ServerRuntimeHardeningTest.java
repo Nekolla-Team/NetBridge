@@ -5,7 +5,6 @@ import org.junit.jupiter.api.io.TempDir;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
 import top.tangge233.netbridge.nativebridge.*;
 import top.tangge233.netbridge.nativebridge.fake.FakeNativeTransportBackend;
-import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -189,9 +188,9 @@ class ServerRuntimeHardeningTest {
             assertTrue(runtime.start(25565, null));
             assertTrue(runtime.isRunning());
 
-            assertThrows(NativeResourceException.class, runtime::stop);
+            assertThrows(RuntimeException.class, runtime::stop);
             assertTrue(runtime.isRunning());
-        } catch (NativeResourceException _) {
+        } catch (RuntimeException _) {
             // expected from close() in try-with-resources
         }
     }

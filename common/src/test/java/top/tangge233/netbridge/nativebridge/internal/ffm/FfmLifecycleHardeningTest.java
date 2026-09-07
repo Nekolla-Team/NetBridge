@@ -175,14 +175,14 @@ class FfmLifecycleHardeningTest {
 
             var ctxAClientEvents = seenA.stream()
                     .filter(e ->
-                            e.eventKind() == NativeEvent.KIND_CONNECTION_STATE
-                                    && e.objectId() == connA
+                            e instanceof NativeEvent.ConnectionStateChanged state
+                                    && state.connectionId() == connA
                     )
                     .toList();
             var ctxBClientEvents = seenB.stream()
                     .filter(e ->
-                            e.eventKind() == NativeEvent.KIND_CONNECTION_STATE
-                                    && e.objectId() == connB
+                            e instanceof NativeEvent.ConnectionStateChanged state
+                                    && state.connectionId() == connB
                     )
                     .toList();
             assertFalse(

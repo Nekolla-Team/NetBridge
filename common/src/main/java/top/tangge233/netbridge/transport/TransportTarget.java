@@ -2,10 +2,25 @@ package top.tangge233.netbridge.transport;
 
 import java.net.InetSocketAddress;
 
+import static java.util.Objects.requireNonNull;
+
 /**
- * 客户端加速连接目标：模式、宣告解析出的传输端点。
+ * Recent client accelerated connection target: the accelerated transport and its resolved transport
+ * endpoint.
  *
- * <p>TCP 降级内建于 QUIC/KCP 模式，无独立开关字段；
- * 端点地址由服务端宣告条目与 ping 目标合成（host 缺省跟随）。
+ * <p>Only accelerated transports (QUIC/KCP) are supported; the invalid state
+ * {@code TransportTarget(TCP, ...)} is impossible at the type level. TCP fallback is built into the
+ * acceleration mode and has no separate toggle field; the endpoint address is composed from the
+ * server-advertised entry and the ping target.
  */
-public record TransportTarget(TransportMode mode, InetSocketAddress endpoint) {}
+public record TransportTarget(
+        AcceleratedTransport transport,
+        InetSocketAddress address
+) {
+
+    public TransportTarget {
+        requireNonNull(transport, "transport");
+        requireNonNull(address, "address");
+    }
+
+}

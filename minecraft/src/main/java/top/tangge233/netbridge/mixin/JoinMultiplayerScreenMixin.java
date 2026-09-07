@@ -13,6 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.TransportMode;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(JoinMultiplayerScreen.class)
 public abstract class JoinMultiplayerScreenMixin extends Screen {
 

@@ -15,6 +15,7 @@ import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(targets = "net.minecraft.client.multiplayer.ServerStatusPinger$1")
 public abstract class ServerStatusPingerResponseMixin {
 

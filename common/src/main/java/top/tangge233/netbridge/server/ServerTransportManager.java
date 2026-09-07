@@ -3,11 +3,10 @@ package top.tangge233.netbridge.server;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.ability.NetworksAbility;
 import top.tangge233.netbridge.ability.NetworksEntry;
-import top.tangge233.netbridge.ability.TransportProtocol;
 import top.tangge233.netbridge.config.server.ServerSettings;
 import top.tangge233.netbridge.config.server.ServerSettingsResolver;
 import top.tangge233.netbridge.nativebridge.*;
-import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 import top.tangge233.netbridge.transport.KcpProfile;
 
 import java.util.ArrayList;
@@ -24,6 +23,7 @@ public final class ServerTransportManager {
     private final @Nullable NativeConnectionAdopter adopter;
     private final Executor adoptExecutor;
     private final long sessionGeneration;
+    private final @Nullable Integer quicPortOverride;
 
     private @Nullable NativeServer quic;
     private @Nullable NativeServer kcp;
@@ -42,8 +42,25 @@ public final class ServerTransportManager {
                 settings,
                 adopter,
                 adoptExecutor,
-                System.nanoTime()
+                System.nanoTime(),
+                null
         );
+    }
+
+    public ServerTransportManager(
+            NativeTransportBackend backend,
+            ServerSettings settings,
+            @Nullable NativeConnectionAdopter adopter,
+            Executor adoptExecutor,
+            long sessionGeneration,
+            @Nullable Integer quicPortOverride
+    ) {
+        this.backend = backend;
+        this.settings = settings;
+        this.adopter = adopter;
+        this.adoptExecutor = adoptExecutor;
+        this.sessionGeneration = sessionGeneration;
+        this.quicPortOverride = quicPortOverride;
     }
 
     public ServerTransportManager(
@@ -53,11 +70,14 @@ public final class ServerTransportManager {
             Executor adoptExecutor,
             long sessionGeneration
     ) {
-        this.backend = backend;
-        this.settings = settings;
-        this.adopter = adopter;
-        this.adoptExecutor = adoptExecutor;
-        this.sessionGeneration = sessionGeneration;
+        this(
+                backend,
+                settings,
+                adopter,
+                adoptExecutor,
+                sessionGeneration,
+                null
+        );
     }
 
     public synchronized boolean start(
@@ -70,24 +90,29 @@ public final class ServerTransportManager {
 
         starting = true;
         try {
-            var resolved = ServerSettingsResolver.resolve(settings, mcPort, mcBindIp);
+            var resolved = ServerSettingsResolver.resolve(
+                    settings,
+                    mcPort,
+                    mcBindIp,
+                    quicPortOverride
+            );
 
-            var entries = new LinkedHashMap<String, NetworksEntry>();
+            var entries = new LinkedHashMap<AcceleratedTransport, NetworksEntry>();
             var started = new ArrayList<NativeServer>();
             try {
-                var q = startTransport("quic", resolved.quic());
+                var q = startTransport(AcceleratedTransport.QUIC, resolved.quic());
                 quic = q;
                 if (q != null) {
                     started.add(q);
                 }
-                collectAnnouncement(entries, "quic", resolved.quic(), q);
+                collectAnnouncement(entries, AcceleratedTransport.QUIC, resolved.quic(), q);
 
-                var k = startTransport("kcp", resolved.kcp());
+                var k = startTransport(AcceleratedTransport.KCP, resolved.kcp());
                 kcp = k;
                 if (k != null) {
                     started.add(k);
                 }
-                collectAnnouncement(entries, "kcp", resolved.kcp(), k);
+                collectAnnouncement(entries, AcceleratedTransport.KCP, resolved.kcp(), k);
             } catch (RuntimeException e) {
                 started.forEach(s -> {
                     try {
@@ -105,7 +130,7 @@ public final class ServerTransportManager {
                 return false;
             }
 
-            announcement = NetworksAbility.of(entries.values().toArray(new NetworksEntry[0]));
+            announcement = NetworksAbility.of(entries);
             var any = quic != null || kcp != null;
             if (!any) {
                 NetBridge.LOGGER.warn("No accelerated transport started; only TCP will be served");
@@ -117,28 +142,25 @@ public final class ServerTransportManager {
     }
 
     private @Nullable NativeServer startTransport(
-            String name,
-            ServerSettingsResolver.ResolvedTransport transport
+            AcceleratedTransport transport,
+            ServerSettingsResolver.ResolvedTransport resolved
     ) {
-        if (!transport.enabled() || !backend.availability().available()) {
+        if (!resolved.enabled() || !backend.availability().available()) {
             return null;
         }
 
-        var request = name.equals("kcp")
+        var request = transport == AcceleratedTransport.KCP
                 ?
-                new NativeServerRequest(
-                        NativeTransportKind.KCP,
-                        transport.bindHost(),
-                        transport.listenPort(),
-                        transport.maxConnections(),
-                        toKcpProfile(transport.kcpProfile())
+                NativeServerRequest.kcp(
+                        resolved.bindHost(),
+                        resolved.listenPort(),
+                        resolved.maxConnections(),
+                        toNativeKcpProfile(resolved.kcpProfile())
                 )
-                : new NativeServerRequest(
-                        NativeTransportKind.QUIC,
-                        transport.bindHost(),
-                        transport.listenPort(),
-                        transport.maxConnections(),
-                        NativeConnectRequest.KcpProfileValue.BALANCED
+                : NativeServerRequest.quic(
+                        resolved.bindHost(),
+                        resolved.listenPort(),
+                        resolved.maxConnections()
                 );
         final NativeServer server;
         try {
@@ -146,8 +168,8 @@ public final class ServerTransportManager {
         } catch (RuntimeException e) {
             NetBridge.LOGGER.error(
                     "{} transport failed to bind udp/{}: transport disabled",
-                    name,
-                    transport.listenPort()
+                    transport.key(),
+                    resolved.listenPort()
             );
             return null;
         }
@@ -157,14 +179,18 @@ public final class ServerTransportManager {
                 dispatch(connection);
             }
         });
-        NetBridge.LOGGER.info("{} acceptor listening on udp/{}", name, server.localPort());
+        NetBridge.LOGGER.info(
+                "{} acceptor listening on udp/{}",
+                transport.key(),
+                server.localPort()
+        );
         return server;
     }
 
     private static void collectAnnouncement(
-            Map<String, NetworksEntry> entries,
-            String name,
-            ServerSettingsResolver.ResolvedTransport transport,
+            Map<AcceleratedTransport, NetworksEntry> entries,
+            AcceleratedTransport transport,
+            ServerSettingsResolver.ResolvedTransport resolved,
             @Nullable NativeServer server
     ) {
         if (server == null) {
@@ -176,26 +202,22 @@ public final class ServerTransportManager {
             return;
         }
 
-        var protocol = name.equals("kcp")
-                ? TransportProtocol.KCP_V1
-                : TransportProtocol.QUIC_V1;
         entries.put(
-                name,
+                transport,
                 new NetworksEntry(
                         true,
-                        transport.advertisedHost(),
-                        actual,
-                        protocol
+                        resolved.advertisedHost(),
+                        actual
                 )
         );
     }
 
-    private static NativeConnectRequest.KcpProfileValue toKcpProfile(
+    private static NativeKcpProfile toNativeKcpProfile(
             @Nullable KcpProfile profile
     ) {
         return profile == KcpProfile.AGGRESSIVE
-                ? NativeConnectRequest.KcpProfileValue.AGGRESSIVE
-                : NativeConnectRequest.KcpProfileValue.BALANCED;
+                ? NativeKcpProfile.AGGRESSIVE
+                : NativeKcpProfile.BALANCED;
     }
 
     private void dispatch(NativeConnection connection) {
@@ -264,7 +286,7 @@ public final class ServerTransportManager {
                 quic.close();
                 quic = null;
             } catch (Throwable e) {
-                NetBridge.LOGGER.warn("Error stopping quic acceptor: {}", e.getMessage());
+                NetBridge.LOGGER.warn("Error stopping quic acceptor", e);
                 errors.add(e);
             }
         }
@@ -274,17 +296,14 @@ public final class ServerTransportManager {
                 kcp.close();
                 kcp = null;
             } catch (Throwable e) {
-                NetBridge.LOGGER.warn("Error stopping kcp acceptor: {}", e.getMessage());
+                NetBridge.LOGGER.warn("Error stopping kcp acceptor", e);
                 errors.add(e);
             }
         }
 
         if (!errors.isEmpty()) {
-            var primary = new NativeResourceException(
-                    "Failed to close all server transports cleanly");
-            for (var err : errors) {
-                primary.addSuppressed(err);
-            }
+            var primary = new RuntimeException("Failed to close all server transports cleanly");
+            errors.forEach(primary::addSuppressed);
             throw primary;
         }
 

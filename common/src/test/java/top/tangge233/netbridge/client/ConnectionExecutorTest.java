@@ -9,12 +9,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.ability.NetworksAbility;
 import top.tangge233.netbridge.ability.NetworksEntry;
-import top.tangge233.netbridge.ability.TransportProtocol;
 import top.tangge233.netbridge.config.client.ClientConfigStore;
 import top.tangge233.netbridge.config.client.ClientSettings;
 import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.nativebridge.*;
 import top.tangge233.netbridge.nativebridge.fake.FakeNativeTransportBackend;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 import top.tangge233.netbridge.transport.KcpProfile;
 import top.tangge233.netbridge.transport.TransportMode;
 
@@ -22,6 +22,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -50,7 +52,7 @@ class ConnectionExecutorTest {
         var adapter = adapter(group);
         var backend = new FakeNativeTransportBackend();
         try (backend) {
-            var plan = ConnectionPlan.tcpOnly(new InetSocketAddress(
+            var plan = new TcpPlan(new InetSocketAddress(
                     "203.0.113.9",
                     25565
             ));
@@ -85,8 +87,8 @@ class ConnectionExecutorTest {
                 store,
                 new NativeRetryPolicy(
                         3,
-                        5000L,
-                        5000L
+                        Duration.ofSeconds(5),
+                        Duration.ofSeconds(5)
                 )
         );
         var adapter = adapter(group);
@@ -114,13 +116,9 @@ class ConnectionExecutorTest {
     }
 
     private static ConnectionPlan planWithNative(InetSocketAddress endpoint) {
-        return ConnectionPlan.withNativeAttempt(
+        return new AcceleratedPlan(
                 new InetSocketAddress("203.0.113.9", 25565),
-                new ConnectionPlan.NativeAttemptPlan(
-                        TransportMode.QUIC,
-                        endpoint,
-                        KcpProfile.BALANCE
-                )
+                new QuicAttempt(endpoint)
         );
     }
 
@@ -237,7 +235,7 @@ class ConnectionExecutorTest {
             );
             assertEquals(
                     endpoint.getPort(),
-                    lookup.orElseThrow().endpoint().getPort()
+                    lookup.orElseThrow().address().getPort()
             );
 
             assertEquals(
@@ -296,14 +294,14 @@ class ConnectionExecutorTest {
                         InetAddress.getLoopbackAddress(),
                         25565
                 ),
-                NetworksAbility.of(
+                NetworksAbility.of(Map.of(
+                        AcceleratedTransport.QUIC,
                         new NetworksEntry(
                                 true,
                                 "127.0.0.1",
-                                25565,
-                                TransportProtocol.QUIC_V1
+                                25565
                         )
-                )
+                ))
         );
 
         var adapter = adapter(group);
@@ -367,12 +365,13 @@ class ConnectionExecutorTest {
         }
 
         @Override
+        @SuppressWarnings("FutureReturnValueIgnored")
         public NativeConnection connect(NativeConnectRequest request) {
             var conn = new AsyncTestConnection(
                     request,
                     ids.getAndIncrement()
             );
-            var unused = group.next().schedule(
+            group.next().schedule(
                     conn::complete,
                     25,
                     TimeUnit.MILLISECONDS

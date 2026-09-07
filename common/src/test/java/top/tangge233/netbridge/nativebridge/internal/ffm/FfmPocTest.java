@@ -92,8 +92,8 @@ class FfmPocTest {
             var serverConnHolder = new long[1];
 
             ctx.dispatcher().addListener(event -> {
-                if (event.eventKind() == NativeEvent.KIND_ACCEPTED) {
-                    serverConnHolder[0] = event.arg0();
+                if (event instanceof NativeEvent.Accepted accepted) {
+                    serverConnHolder[0] = accepted.connectionId();
                     acceptedConnLatch.countDown();
                 }
             });
@@ -218,8 +218,9 @@ class FfmPocTest {
 
             ctx.dispatcher().addListener(event -> {
                 receivedEvents.add(event);
-                if (event.eventKind() == NativeEvent.KIND_ACCEPTED
-                        || event.eventKind() == NativeEvent.KIND_CONNECTION_STATE) {
+                if (event instanceof NativeEvent.Accepted
+                        || event instanceof NativeEvent.ConnectionStateChanged
+                ) {
                     eventLatch.countDown();
                 }
             });

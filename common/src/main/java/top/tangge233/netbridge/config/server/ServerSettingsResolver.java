@@ -4,14 +4,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.tangge233.netbridge.transport.KcpProfile;
 
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
-/**
- * 将服务端原始配置解析并绑定到具体网络端口与网卡。
- */
+import static java.util.Objects.requireNonNull;
+
 public final class ServerSettingsResolver {
 
-    public static final String PROP_QUIC_PORT = "netbridge.quicPort";
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerSettingsResolver.class);
 
     private ServerSettingsResolver() {
@@ -22,12 +21,24 @@ public final class ServerSettingsResolver {
             int mcPort,
             @Nullable String mcBindIp
     ) {
+        return resolve(settings, mcPort, mcBindIp, null);
+    }
+
+    public static ResolvedServerSettings resolve(
+            ServerSettings settings,
+            int mcPort,
+            @Nullable String mcBindIp,
+            @Nullable Integer quicPortOverride
+    ) {
+        var quicTargetPort = quicPortOverride != null
+                ? quicPortOverride
+                : settings.quic().port();
         var quic = resolveTransport(
                 "quic",
                 settings.quic(),
                 mcPort,
                 mcBindIp,
-                resolveQuicPortOverride(settings.quic().port())
+                quicTargetPort
         );
         var kcp = resolveTransport(
                 "kcp",
@@ -102,22 +113,6 @@ public final class ServerSettingsResolver {
         );
     }
 
-    private static int resolveQuicPortOverride(int configuredPort) {
-        var sys = System.getProperty(PROP_QUIC_PORT);
-        if (sys != null && !sys.isBlank()) {
-            try {
-                return Integer.parseInt(sys.trim());
-            } catch (NumberFormatException e) {
-                LOGGER.warn(
-                        "Invalid {} '{}': not a number; using configured value",
-                        PROP_QUIC_PORT,
-                        sys
-                );
-            }
-        }
-        return configuredPort;
-    }
-
     private static int applyFollowSemantics(
             String name,
             int configured,
@@ -143,6 +138,12 @@ public final class ServerSettingsResolver {
         return target;
     }
 
+    private static @Nullable String normalizeBlankToNull(@Nullable String value) {
+        return value == null || value.isBlank()
+                ? null
+                : value;
+    }
+
     public record ResolvedTransport(
             boolean enabled,
             int listenPort,
@@ -152,12 +153,38 @@ public final class ServerSettingsResolver {
             @Nullable KcpProfile kcpProfile
     ) {
 
+        public ResolvedTransport {
+            if (enabled
+                    ? (listenPort < 0 || listenPort > 65535)
+                    : listenPort != -1
+            ) {
+                throw new IllegalArgumentException(
+                        "enabled=%s listenPort must be -1 (disabled) or 0..65535 (enabled), was %d".formatted(
+                                enabled,
+                                listenPort
+                        )
+                );
+            }
+            if (maxConnections < 1) {
+                throw new IllegalArgumentException(
+                        "maxConnections must be >= 1, was " + maxConnections
+                );
+            }
+            bindHost = normalizeBlankToNull(bindHost);
+            advertisedHost = normalizeBlankToNull(advertisedHost);
+        }
+
     }
 
     public record ResolvedServerSettings(
             ResolvedTransport quic,
             ResolvedTransport kcp
     ) {
+
+        public ResolvedServerSettings {
+            requireNonNull(quic, "quic");
+            requireNonNull(kcp, "kcp");
+        }
 
     }
 

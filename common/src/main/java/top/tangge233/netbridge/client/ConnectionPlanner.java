@@ -2,12 +2,15 @@ package top.tangge233.netbridge.client;
 
 import top.tangge233.netbridge.ability.NetworksAbility;
 import top.tangge233.netbridge.config.client.ClientSettings;
-import top.tangge233.netbridge.transport.KcpProfile;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 import top.tangge233.netbridge.transport.TransportMode;
 import top.tangge233.netbridge.transport.TransportTarget;
 
 import java.net.InetSocketAddress;
+import java.util.Objects;
 import java.util.Optional;
+
+import static java.util.Objects.requireNonNull;
 
 public final class ConnectionPlanner {
 
@@ -20,45 +23,51 @@ public final class ConnectionPlanner {
     ) {
         var mode = settings.mode();
         if (mode == TransportMode.TCP || !nativeAvailable) {
-            return ConnectionPlan.tcpOnly(tcpAddress);
+            return new TcpPlan(tcpAddress);
         }
 
-        if (recentSuccess.isPresent() && recentSuccess.get().mode() == mode) {
-            var target = recentSuccess.get();
-            return ConnectionPlan.withNativeAttempt(
+        var transport = requireNonNull(
+                AcceleratedTransport.fromMode(mode),
+                "accelerated transport requested for non-TCP mode"
+        );
+
+        if (recentSuccess.isPresent() && recentSuccess.get().transport() == transport) {
+            return new AcceleratedPlan(
                     tcpAddress,
-                    new ConnectionPlan.NativeAttemptPlan(
-                            target.mode(),
-                            target.endpoint(),
-                            mode == TransportMode.KCP
-                                    ? settings.kcpProfile()
-                                    : null
+                    attemptFor(
+                            mode,
+                            settings,
+                            recentSuccess.get().address()
                     )
             );
         }
 
-        var key = mode == TransportMode.QUIC
-                ? NetworksAbility.KEY_QUIC
-                : NetworksAbility.KEY_KCP;
-        var entry = advertised.entry(key);
+        var entry = advertised.entry(transport);
         if (entry == null || !entry.usable()) {
-            return ConnectionPlan.tcpOnly(tcpAddress);
+            return new TcpPlan(tcpAddress);
         }
 
         var host = entry.host() != null
                 ? entry.host()
                 : tcpAddress.getHostString();
-        var endpoint = InetSocketAddress.createUnresolved(host, entry.port());
-        return ConnectionPlan.withNativeAttempt(
-                tcpAddress,
-                new ConnectionPlan.NativeAttemptPlan(
-                        mode,
-                        endpoint,
-                        mode == TransportMode.KCP
-                                ? settings.kcpProfile()
-                                : KcpProfile.BALANCE
-                )
+        var endpoint = InetSocketAddress.createUnresolved(
+                host,
+                entry.port()
         );
+        return new AcceleratedPlan(
+                tcpAddress,
+                attemptFor(mode, settings, endpoint)
+        );
+    }
+
+    private static NativeAttempt attemptFor(
+            TransportMode mode,
+            ClientSettings settings,
+            InetSocketAddress endpoint
+    ) {
+        return mode == TransportMode.KCP
+                ? new KcpAttempt(endpoint, settings.kcpProfile())
+                : new QuicAttempt(endpoint);
     }
 
 }

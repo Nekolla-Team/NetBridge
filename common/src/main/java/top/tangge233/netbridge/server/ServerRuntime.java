@@ -15,12 +15,14 @@ public final class ServerRuntime implements AutoCloseable {
 
     private final NativeTransportBackend backend;
     private final ServerConfigStore configStore;
+    private final @Nullable Integer quicPortOverride;
     private final AtomicLong generationSequence = new AtomicLong(1);
-    private final ExecutorService adoptExecutor = Executors.newSingleThreadExecutor(r -> {
-        var thread = new Thread(r, "net-bridge-adopt");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService adoptExecutor = Executors.newSingleThreadExecutor(
+            Thread.ofPlatform()
+                    .name("net-bridge-adopt")
+                    .daemon()
+                    .factory()
+    );
 
     private volatile @Nullable ServerTransportManager manager;
     private volatile @Nullable NativeConnectionAdopter adopter;
@@ -30,8 +32,17 @@ public final class ServerRuntime implements AutoCloseable {
             NativeTransportBackend backend,
             ServerConfigStore configStore
     ) {
+        this(backend, configStore, null);
+    }
+
+    public ServerRuntime(
+            NativeTransportBackend backend,
+            ServerConfigStore configStore,
+            @Nullable Integer quicPortOverride
+    ) {
         this.backend = backend;
         this.configStore = configStore;
+        this.quicPortOverride = quicPortOverride;
     }
 
     public void setAdopter(@Nullable NativeConnectionAdopter adopter) {
@@ -56,7 +67,8 @@ public final class ServerRuntime implements AutoCloseable {
                 configStore.load(),
                 adopter,
                 adoptExecutor,
-                generationSequence.getAndIncrement()
+                generationSequence.getAndIncrement(),
+                quicPortOverride
         );
         this.manager = next;
         var started = false;

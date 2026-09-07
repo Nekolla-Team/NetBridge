@@ -60,15 +60,20 @@
 
 ## 客户端行为
 
-- **TransportMode**：三档 `tcp` / `quic` / `kcp`。quic/kcp 内置 TCP 降级，tcp 无降级概念。
+- **TransportMode**：三档 `tcp` / `quic` / `kcp`（配置串），用户选择的“意图”。quic/kcp 内置 TCP 降级，tcp
+  无降级概念。加速意图经 `AcceleratedTransport.fromMode` 映射为传输域对象。
 - **ConnectionPlanner**：纯决策对象，输入 mode × 能力宣告 × 最近成功缓存 × native 可用性，输出不可变
-  `ConnectionPlan`（`NativeAttemptPlan` 或 TCP-only）。所选传输未 宣告/协议不支持 → 直接 TCP，不尝试其他加速传输。
-- **ConnectionExecutor**：执行 plan——按 `NativeRetryPolicy`（至多 2 次尝试，10s/20s 看门狗）驱动 native
-  尝试、关闭失败尝试、记录成功端点、发布状态快照、最终经
-  `ConnectionExecutorAdapter.openTcp` 回落原版 TCP。
-- **SuccessfulEndpointCache**：按地址记录 TTL 5 分钟内的 **成功**加速端点，TTL 内同传输
-  重连跳过宣告协商；换模式立即失效；失败不写记忆。
-- **ServerCapabilityCache**：实例级 LRU（256），按地址缓存 ping 解析出的 networks 能力。
+  `ConnectionPlan`：`TcpPlan`（直接 TCP）或 `AcceleratedPlan(tcpAddress, NativeAttempt)`；
+  `NativeAttempt` 为 `QuicAttempt(endpoint)` / `KcpAttempt(endpoint, profile)`。所选传输未宣告/
+  不可用 → 直接 TCP，不尝试其他加速传输。
+- **ConnectionExecutor**：执行 plan——按 `NativeRetryPolicy`（至多 2 次尝试，10s/20s 看门狗，
+  `Duration` 语义）驱动 native 尝试、关闭失败尝试、记录成功端点、发布状态快照、最终经
+  `ConnectionExecutorAdapter.openTcp` 回落原版 TCP。成功按 `TransportTarget(AcceleratedTransport,
+  address)` 记忆。
+- **SuccessfulEndpointCache**：以 `EndpointKey(host,port)` 为键，TTL（`Duration`，默认 5 分钟， 单调
+  `nanoTime` ticker 注入）内记录 **成功**加速端点；TTL 内同传输重连跳过宣告协商；换传输立即 失效；有界（默认
+  256）按最早过期淘汰；失败不写记忆。
+- **ServerCapabilityCache**：实例级 LRU（256，`EndpointKey` 键），按地址缓存 ping 解析出的 networks 能力。
 - **连接状态快照**：`ConnectionStateStore` 发布不可变 `ConnectionSnapshot`
   （CONNECTING/CONNECTED/FALLING_BACK/IDLE），ConnectScreen 与 F3 行只读快照，
   `ConnectStatus`/`ConnectionDisplay` 静态类已删除。
@@ -112,3 +117,26 @@
 - **CI**：java-unit（无 native）/ rust-unit（fmt+clippy -D warnings+test）/ abi-check（符号+布局+
   `--illegal-native-access=deny` 下 FFM 集成）/ 全平台 native matrix → package（Java 25）→
   release；publish 依赖全部前置 job。
+
+## Java 域模型补充术语（ADR-0012 现代化后）
+
+- **accelerated transport（加速传输）**：`transport.AcceleratedTransport` 枚举
+  `QUIC`/`KCP`，是传输域（planner/能力表/成功缓存）与 status JSON 键的唯一事实源： 每项携带 wire status
+  `key()`（`"quic"`/`"kcp"`）与应用层 `protocol()` 版本串。语义枚举，不存 ABI 整数。
+- **transport mode（传输模式）**：`transport.TransportMode` 三档（tcp/quic/kcp）——用户配置层 “意图”枚举（
+  `parse/configValue` 处理配置串）；与 `AcceleratedTransport` 经 `fromMode`
+  互转，TCP 意图没有加速形态。
+- **native transport kind（原生传输类型）**：`nativebridge.NativeTransportKind`（QUIC/KCP）， native
+  会话面对的类型；与 C ABI 数字的映射只在 FFM codec 内（`FfmAbiCodec`）， QUIC=1/KCP=2 不进语义枚举。
+- **status networks ability（状态网络能力）**：`ability.NetworksAbility`——不可变
+  `EnumMap<AcceleratedTransport, NetworksEntry>` 快照；wire 形态为列表 ping 的顶层
+  `networks` 对象，仅由 `ability.StatusNetworksCodec` 编解码（Jackson Core streaming， 约束长度/深度）。
+  `NetworksEntry` 为纯 record（enabled/host/port），protocol 不再驻留域对象。
+- **FFM ABI codec**：`nativebridge.internal.ffm.FfmAbiCodec`——C ABI 数值（传输/连接状态/ 事件
+  kind/服务端状态/kcp profile/failure reason/事件解码/socket 地址）唯一 Java 映射点；
+  未知数值显式拒绝（fail-closed，failure reason 未知→GENERIC 为有意例外）。 配套 `FfmCallGate`
+  承载调用生命周期（记账/drain/关闭同步）。
+- **interception/bypass scope（拦截与直连作用域）**：`client.AccelerationInterceptionScope`， 以两个
+  `ScopedValue` 表达“加速连接进行中”与“vanilla 直连 bypass”：`ConnectionMixin`
+  在真实 `Connection.connect` 前进入拦截作用域，`MinecraftAdapter.openTcp` 在 vanilla 回落调用点 绑定
+  bypass，随调用栈自动展开、嵌套不泄漏（取代旧 `ThreadLocal<Boolean>` 布尔守卫）。

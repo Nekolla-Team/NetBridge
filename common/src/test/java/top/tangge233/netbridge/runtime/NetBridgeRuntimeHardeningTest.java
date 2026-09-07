@@ -9,7 +9,6 @@ import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
 import top.tangge233.netbridge.nativebridge.*;
 import top.tangge233.netbridge.nativebridge.fake.FakeNativeTransportBackend;
-import top.tangge233.netbridge.nativebridge.internal.ffm.NativeResourceException;
 
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,7 +65,7 @@ class NetBridgeRuntimeHardeningTest {
         var runtime = new NetBridgeRuntime(paths, clientSettings, serverConfig, backend);
         assertEquals(NetBridgeRuntime.State.OPEN, runtime.state());
 
-        assertThrows(NativeResourceException.class, runtime::close);
+        assertThrows(RuntimeException.class, runtime::close);
         assertEquals(NetBridgeRuntime.State.CLOSE_FAILED, runtime.state());
         assertTrue(backendClosed.get());
     }

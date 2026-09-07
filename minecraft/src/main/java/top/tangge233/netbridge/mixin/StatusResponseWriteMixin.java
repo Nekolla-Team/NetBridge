@@ -15,6 +15,7 @@ import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.nio.charset.StandardCharsets;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(ClientboundStatusResponsePacket.class)
 public abstract class StatusResponseWriteMixin {
 
@@ -32,18 +33,22 @@ public abstract class StatusResponseWriteMixin {
     private <T> void netbridge$injectNetworks(FriendlyByteBuf buf, Codec<T> codec, T value) {
         var serverRuntime = NetBridgeServices.serverRuntime();
         String json = null;
-        if (value instanceof ServerStatus status && serverRuntime.isRunning()) {
+        if (value instanceof ServerStatus status
+                && serverRuntime.isRunning()
+        ) {
             @SuppressWarnings("unchecked")
             var statusCodec = (Codec<ServerStatus>) codec;
             json = statusCodec
                     .encodeStart(JsonOps.INSTANCE, status)
-                    .getOrThrow(msg -> new IllegalStateException("Failed to encode status: " + msg))
+                    .getOrThrow(msg ->
+                            new IllegalStateException("Failed to encode status: " + msg)
+                    )
                     .toString();
         }
         if (json != null) {
             var injected = StatusNetworksCodec.addNetworks(
                     json,
-                    StatusNetworksCodec.buildNetworks(serverRuntime.announcement().entries())
+                    serverRuntime.announcement()
             );
             if (injected.getBytes(StandardCharsets.UTF_8).length <= MAX_STATUS_JSON) {
                 buf.writeUtf(injected, MAX_STATUS_JSON);

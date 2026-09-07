@@ -27,15 +27,11 @@ class FfmBackendSliceTest {
 
     @Test
     void quicLoopbackAcceptDataAndClose() throws Exception {
-        runSlice(
-                NativeTransportKind.QUIC,
-                NativeConnectRequest.KcpProfileValue.BALANCED
-        );
+        runSlice(NativeTransportKind.QUIC);
     }
 
     private void runSlice(
-            NativeTransportKind kind,
-            NativeConnectRequest.KcpProfileValue profile
+            NativeTransportKind kind
     ) throws Exception {
         try (
                 var backend = FfmNativeTransportBackend.load(
@@ -45,13 +41,16 @@ class FfmBackendSliceTest {
         ) {
             assertTrue(backend.availability().available());
 
-            var server = backend.startServer(new NativeServerRequest(
-                    kind,
-                    null,
-                    0,
-                    64,
-                    profile
-            ));
+            var server = backend.startServer(
+                    switch (kind) {
+                        case QUIC -> NativeServerRequest.quic(0, 64);
+                        case KCP -> NativeServerRequest.kcp(
+                                0,
+                                64,
+                                NativeKcpProfile.BALANCED
+                        );
+                    }
+            );
             assertEquals(kind, server.transport());
             assertTrue(server.localPort() > 0);
 
@@ -65,12 +64,19 @@ class FfmBackendSliceTest {
                 }
             });
 
-            var client = backend.connect(new NativeConnectRequest(
-                    kind,
-                    "127.0.0.1",
-                    server.localPort(),
-                    profile
-            ));
+            var client = backend.connect(
+                    switch (kind) {
+                        case QUIC -> NativeConnectRequest.quic(
+                                "127.0.0.1",
+                                server.localPort()
+                        );
+                        case KCP -> NativeConnectRequest.kcp(
+                                "127.0.0.1",
+                                server.localPort(),
+                                NativeKcpProfile.BALANCED
+                        );
+                    }
+            );
             assertEquals(kind, client.transport());
 
             var connectedLatch = new CountDownLatch(1);
@@ -165,7 +171,7 @@ class FfmBackendSliceTest {
 
     @Test
     void kcpLoopbackAcceptDataAndClose() throws Exception {
-        runSlice(NativeTransportKind.KCP, NativeConnectRequest.KcpProfileValue.BALANCED);
+        runSlice(NativeTransportKind.KCP);
     }
 
     @Test

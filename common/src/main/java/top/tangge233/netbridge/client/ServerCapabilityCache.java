@@ -10,42 +10,55 @@ import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Ping 解析能力实例缓存（LRU）。
+ * Bounded access-order LRU cache of ping-announced {@link NetworksAbility} per server endpoint.
+ *
+ * <p>Keys are typed {@link EndpointKey}s (textual host + port). Entries are evicted in
+ * least-recently-used order once the capacity ({@code maxEntries}) is exceeded.
+ * {@code maxEntries <= 0} disables the cache (record is a no-op, get returns empty).</p>
  */
 public final class ServerCapabilityCache {
 
-    private static final int MAX_ENTRIES = 256;
+    public static final int DEFAULT_MAX_ENTRIES = 256;
 
-    private final Map<String, NetworksAbility> networks = Collections.synchronizedMap(
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, NetworksAbility> eldest) {
-                    return size() > MAX_ENTRIES;
+    private final boolean enabled;
+    private final Map<EndpointKey, NetworksAbility> networks;
+
+    public ServerCapabilityCache() {
+        this(DEFAULT_MAX_ENTRIES);
+    }
+
+    public ServerCapabilityCache(int maxEntries) {
+        this.enabled = maxEntries > 0;
+        this.networks = Collections.synchronizedMap(
+                new LinkedHashMap<>(64, 0.75f, true) {
+                    @Override
+                    protected boolean removeEldestEntry(
+                            Map.Entry<EndpointKey, NetworksAbility> eldest
+                    ) {
+                        return size() > maxEntries;
+                    }
                 }
-            }
-    );
+        );
+    }
 
     public void record(
             @Nullable InetSocketAddress address,
             @Nullable NetworksAbility ability
     ) {
-        if (address == null || ability == null) {
+        if (address == null || ability == null || !enabled) {
             return;
         }
-        networks.put(key(address), ability);
-    }
-
-    private static String key(InetSocketAddress address) {
-        return address.getHostString() + ":" + address.getPort();
+        networks.put(EndpointKey.of(address), ability);
     }
 
     public NetworksAbility get(@Nullable InetSocketAddress address) {
-        return address == null
-                ? NetworksAbility.empty()
-                : networks.getOrDefault(
-                        key(address),
-                        NetworksAbility.empty()
-                );
+        if (address == null || !enabled) {
+            return NetworksAbility.empty();
+        }
+        return networks.getOrDefault(
+                EndpointKey.of(address),
+                NetworksAbility.empty()
+        );
     }
 
     public void clear() {

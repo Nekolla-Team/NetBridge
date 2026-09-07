@@ -1,6 +1,5 @@
 package top.tangge233.netbridge.config;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import top.tangge233.netbridge.config.client.ClientConfigStore;
@@ -14,15 +13,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/**
- * 客户端配置存储、持久化与运行时服务测试。
- */
 class ClientConfigTest {
-
-    @AfterEach
-    void tearDown() {
-        System.clearProperty(ClientSettingsService.PROP_MODE);
-    }
 
     @Test
     void loadsDefaultsWhenFileDoesNotExist(@TempDir Path dir) {
@@ -105,12 +96,11 @@ class ClientConfigTest {
     }
 
     @Test
-    void clientSettingsServiceAppliesSystemPropertyAndPersistsUpdates(@TempDir Path dir) {
+    void clientSettingsServiceAppliesTransportOverrideAndPersistsUpdates(@TempDir Path dir) {
         var clientFile = dir.resolve("client.toml");
         var store = new ClientConfigStore(clientFile);
 
-        System.setProperty(ClientSettingsService.PROP_MODE, "kcp");
-        var service = ClientSettingsService.create(store);
+        var service = ClientSettingsService.create(store, TransportMode.KCP);
 
         assertEquals(TransportMode.KCP, service.current().mode());
 
@@ -121,6 +111,126 @@ class ClientConfigTest {
         // Verify persisted to disk
         var reloaded = store.load();
         assertEquals(TransportMode.QUIC, reloaded.mode());
+    }
+
+    @Test
+    void wrongTypeModeOnlyDefaultsModeField(@TempDir Path dir) throws Exception {
+        var clientFile = dir.resolve("client.toml");
+        Files.writeString(
+                clientFile,
+                """
+                        mode = 42
+                        [kcp]
+                        profile = "aggressive"
+                        """
+        );
+
+        var store = new ClientConfigStore(clientFile);
+        var settings = store.load();
+
+        assertEquals(
+                TransportMode.TCP,
+                settings.mode(),
+                "非字符串 mode 仅回退默认 TCP"
+        );
+        assertEquals(
+                KcpProfile.AGGRESSIVE,
+                settings.kcpProfile(),
+                "坏 mode 不应影响合法 profile"
+        );
+    }
+
+    @Test
+    void wrongTypeProfileOnlyDefaultsProfileField(@TempDir Path dir) throws Exception {
+        var clientFile = dir.resolve("client.toml");
+        Files.writeString(
+                clientFile,
+                """
+                        mode = "kcp"
+                        [kcp]
+                        profile = 7
+                        """
+        );
+
+        var store = new ClientConfigStore(clientFile);
+        var settings = store.load();
+
+        assertEquals(
+                TransportMode.KCP,
+                settings.mode()
+        );
+        assertEquals(
+                KcpProfile.BALANCE,
+                settings.kcpProfile(),
+                "坏 profile 仅回退默认 BALANCE"
+        );
+    }
+
+    @Test
+    void unknownModeStringOnlyDefaultsModeField(@TempDir Path dir) throws Exception {
+        var clientFile = dir.resolve("client.toml");
+        Files.writeString(
+                clientFile,
+                """
+                        mode = "sctp"
+                        [kcp]
+                        profile = "aggressive"
+                        """
+        );
+
+        var store = new ClientConfigStore(clientFile);
+        var settings = store.load();
+
+        assertEquals(TransportMode.TCP, settings.mode());
+        assertEquals(KcpProfile.AGGRESSIVE, settings.kcpProfile());
+    }
+
+    @Test
+    void unknownTomlKeyIgnoredByClientStore(@TempDir Path dir) throws Exception {
+        var clientFile = dir.resolve("client.toml");
+        Files.writeString(
+                clientFile,
+                """
+                        mode = "kcp"
+                        future_key = "abc"
+                        [kcp]
+                        profile = "aggressive"
+                        """
+        );
+
+        var store = new ClientConfigStore(clientFile);
+        var settings = store.load();
+
+        assertEquals(TransportMode.KCP, settings.mode());
+        assertEquals(KcpProfile.AGGRESSIVE, settings.kcpProfile());
+    }
+
+    @Test
+    void atomicSaveOverwritesExistingAndLeavesNoTempFiles(@TempDir Path dir) throws Exception {
+        var clientFile = dir.resolve("client.toml");
+        var store = new ClientConfigStore(clientFile);
+        store.save(new ClientSettings(TransportMode.QUIC, KcpProfile.AGGRESSIVE));
+        store.save(new ClientSettings(TransportMode.KCP, KcpProfile.BALANCE));
+
+        var loaded = store.load();
+        assertEquals(TransportMode.KCP, loaded.mode());
+        assertEquals(KcpProfile.BALANCE, loaded.kcpProfile());
+
+        try (var entries = Files.list(dir)) {
+            var names = entries
+                    .map(Path::getFileName)
+                    .map(Object::toString)
+                    .toList();
+            assertEquals(
+                    1,
+                    names.size(),
+                    "保存后目录应只剩 client.toml"
+            );
+            assertEquals(
+                    "client.toml",
+                    names.getFirst()
+            );
+        }
     }
 
 }

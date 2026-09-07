@@ -9,6 +9,7 @@ import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.util.List;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(DebugScreenOverlay.class)
 public abstract class DebugScreenOverlayMixin {
 

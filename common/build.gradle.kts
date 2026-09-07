@@ -7,9 +7,11 @@ plugins {
 
 dependencies {
     implementation(libs.slf4j)
-    implementation(libs.gson)
-    api(libs.nightconfig.core)
-    api(libs.nightconfig.toml)
+    implementation(libs.jackson.core)
+
+    implementation(libs.nightconfig.core)
+    implementation(libs.nightconfig.toml)
+
     implementation(libs.bundles.netty)
 }
 
@@ -20,9 +22,22 @@ val nativeIntegrationTest = tasks.register<Test>("nativeIntegrationTest") {
     group = "verification"
 
     useJUnitPlatform()
-    testClassesDirs = sourceSets.named("test").get().output.classesDirs
-    classpath = sourceSets.named("test").get().runtimeClasspath
-    dependsOn(rootProject.tasks.named("buildCdylib"))
+
+    testClassesDirs = sourceSets
+            .named("test")
+            .get()
+            .output
+            .classesDirs
+
+    classpath = sourceSets
+            .named("test")
+            .get()
+            .runtimeClasspath
+
+    dependsOn(
+        rootProject.tasks.named("buildCdylib")
+    )
+
     jvmArgs(
         "-Dnetbridge.native.path=${cdylibDir.get().asFile}/${NativePlatform.subdir}/${NativePlatform.cdylibName}",
         "--enable-native-access=ALL-UNNAMED",
@@ -31,14 +46,24 @@ val nativeIntegrationTest = tasks.register<Test>("nativeIntegrationTest") {
 }
 
 sourceSets.create("benchmark")
+
 configurations.getByName("benchmarkImplementation") {
-    extendsFrom(configurations.implementation.get())
+    extendsFrom(
+        configurations.implementation.get()
+    )
 }
+
 configurations.getByName("benchmarkCompileOnly") {
-    extendsFrom(configurations.compileOnly.get())
+    extendsFrom(
+        configurations.compileOnly.get()
+    )
 }
+
 sourceSets.named("benchmark") {
-    val mainOutput = sourceSets.named("main").map { it.output }
+    val mainOutput = sourceSets
+            .named("main")
+            .map { it.output }
+
     compileClasspath += mainOutput.get()
     runtimeClasspath += mainOutput.get()
 }
@@ -46,20 +71,30 @@ sourceSets.named("benchmark") {
 tasks.register<JavaExec>("ffmBenchmark") {
     description = "Runs the FFM micro/end-to-end benchmark harness (repeatable, not part of test)."
     group = "verification"
-    dependsOn(rootProject.tasks.named("buildCdylib"))
-    mainClass.set("top.tangge233.netbridge.benchmark.FfmBenchmark")
+
+    dependsOn(
+        rootProject.tasks.named("buildCdylib")
+    )
+
+    mainClass.set(
+        "top.tangge233.netbridge.benchmark.FfmBenchmark"
+    )
+
     classpath(
         sourceSets.named("benchmark").map { it.output },
         sourceSets.named("main").map { it.output },
         configurations.getByName("benchmarkRuntimeClasspath")
     )
+
     jvmArgs(
         "-Dnetbridge.native.path=${cdylibDir.get().asFile}/${NativePlatform.subdir}/${NativePlatform.cdylibName}",
         "--enable-native-access=ALL-UNNAMED"
     )
+
     argumentProviders.add {
         listOf(
-            cdylibDir.get().asFile
+            cdylibDir.get()
+                    .asFile
                     .resolve(NativePlatform.subdir)
                     .resolve(NativePlatform.cdylibName)
                     .absolutePath
@@ -68,8 +103,13 @@ tasks.register<JavaExec>("ffmBenchmark") {
 }
 
 tasks.named<Jar>("jar") {
-    dependsOn(rootProject.tasks.named("buildCdylib"))
-    dependsOn(rootProject.tasks.named("generateNativeManifest"))
+    dependsOn(
+        rootProject.tasks.named("buildCdylib")
+    )
+    dependsOn(
+        rootProject.tasks.named("generateNativeManifest")
+    )
+
     from(cdylibDir) {
         into("native/")
     }

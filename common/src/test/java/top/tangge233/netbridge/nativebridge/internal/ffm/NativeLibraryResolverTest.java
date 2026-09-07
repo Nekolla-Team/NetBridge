@@ -34,7 +34,8 @@ class NativeLibraryResolverTest {
                     NativeResourceException.class,
                     NativeLibraryResolver::nativeResourceName
             );
-            assertEquals("UNSUPPORTED_PLATFORM:", ex.code());
+            assertEquals("UNSUPPORTED_PLATFORM", ex.code());
+            assertEquals(NativeResourceError.UNSUPPORTED_PLATFORM, ex.error());
             var msg = ex.getMessage();
             assertNotNull(msg);
             assertTrue(msg.contains("SolarisOS".toLowerCase(Locale.ROOT)));
@@ -54,7 +55,7 @@ class NativeLibraryResolverTest {
                     NativeResourceException.class,
                     NativeLibraryResolver::platformDir
             );
-            assertEquals("UNSUPPORTED_PLATFORM:", ex.code());
+            assertEquals("UNSUPPORTED_PLATFORM", ex.code());
             var msg = ex.getMessage();
             assertNotNull(msg);
             assertTrue(msg.contains("mips64"));
@@ -76,7 +77,7 @@ class NativeLibraryResolverTest {
                     NativeResourceException.class,
                     NativeLibraryResolver::platformDir
             );
-            assertEquals("UNSUPPORTED_PLATFORM:", ex.code());
+            assertEquals("UNSUPPORTED_PLATFORM", ex.code());
         } finally {
             if (originalOs != null) {
                 System.setProperty("os.name", originalOs);

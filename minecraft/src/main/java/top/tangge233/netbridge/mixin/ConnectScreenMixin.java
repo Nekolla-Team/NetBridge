@@ -12,6 +12,7 @@ import top.tangge233.netbridge.client.ConnectionSnapshot;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.TransportMode;
 
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 @Mixin(ConnectScreen.class)
 public abstract class ConnectScreenMixin extends Screen {
 

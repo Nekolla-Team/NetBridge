@@ -5,14 +5,17 @@ import top.tangge233.netbridge.transport.KcpProfile;
 import org.jspecify.annotations.Nullable;
 
 /**
- * 服务端单个传输协议配置（未解析状态，端口允许 -1 或 0）。
+ * Server-side configuration for a single transport protocol (unparsed state; port may be -1 or 0).
  *
- * @param enabled        是否启用
- * @param bindHost       监听 IP 字面量（null 或空表示跟随 server-ip / 全部网卡）
- * @param advertisedHost 下发 Ping 响应的主机名/IP（null 表示跟随连接主机）
- * @param port           配置端口（-1 跟随 MC 端口，0 随机分配，1..65535 固定端口）
- * @param maxConnections 最大活跃连接数（>= 1）
- * @param kcpProfile     KCP 参数档（仅 KCP 有效）
+ * @param enabled        Whether the protocol is enabled
+ * @param bindHost       Listening IP literal (null or empty means follow server-ip / bind to all
+ *                       interfaces)
+ * @param advertisedHost Hostname/IP advertised in the Ping response (null means follow the
+ *                       connecting host)
+ * @param port           Configured port (-1 follows the MC port, 0 assigns a random port, 1..65535
+ *                       uses a fixed port)
+ * @param maxConnections Maximum number of active connections (>= 1)
+ * @param kcpProfile     KCP parameter profile (KCP only)
  */
 public record ServerTransportSettings(
         boolean enabled,
@@ -24,6 +27,27 @@ public record ServerTransportSettings(
 ) {
 
     public static final int DEFAULT_MAX_CONNECTIONS = 256;
+
+    public ServerTransportSettings {
+        if (port < -1 || port > 65535) {
+            throw new IllegalArgumentException(
+                    "port must be -1 (follow), 0 (ephemeral) or 1..65535, was " + port
+            );
+        }
+        if (maxConnections < 1) {
+            throw new IllegalArgumentException(
+                    "maxConnections must be >= 1, was " + maxConnections
+            );
+        }
+        bindHost = normalizeBlankToNull(bindHost);
+        advertisedHost = normalizeBlankToNull(advertisedHost);
+    }
+
+    private static @Nullable String normalizeBlankToNull(@Nullable String value) {
+        return value == null || value.isBlank()
+                ? null
+                : value;
+    }
 
     public static ServerTransportSettings defaultQuic() {
         return new ServerTransportSettings(

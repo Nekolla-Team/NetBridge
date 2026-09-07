@@ -10,6 +10,7 @@ import top.tangge233.netbridge.mc.NativeServerTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 @Mixin(MinecraftServer.class)
+@SuppressWarnings({"UnusedMethod", "UnusedVariable"})
 public class MinecraftServerLifecycleMixin {
 
     @Inject(

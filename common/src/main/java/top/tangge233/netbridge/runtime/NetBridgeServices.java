@@ -2,6 +2,7 @@ package top.tangge233.netbridge.runtime;
 
 import top.tangge233.netbridge.client.ClientRuntime;
 import top.tangge233.netbridge.config.ConfigPaths;
+import top.tangge233.netbridge.config.NetBridgeProperties;
 import top.tangge233.netbridge.config.client.ClientConfigStore;
 import top.tangge233.netbridge.config.client.ClientSettingsService;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
@@ -28,42 +29,45 @@ public final class NetBridgeServices {
             throw new IllegalStateException("NetBridge has already been bootstrapped");
         }
 
+        var properties = NetBridgeProperties.load();
         var clientSettings = ClientSettingsService.create(
-                new ClientConfigStore(paths.clientFile())
+                new ClientConfigStore(paths.clientFile()),
+                properties.transportOverride()
         );
         var serverConfigStore = new ServerConfigStore(paths.serverFile());
-        var backend = createNativeBackend();
+        var backend = createNativeBackend(properties);
         var created = new NetBridgeRuntime(
                 paths,
                 clientSettings,
                 serverConfigStore,
-                backend
+                backend,
+                properties.quicPort()
         );
         runtime = created;
         return created;
     }
 
-    private static NativeTransportBackend createNativeBackend() {
+    private static NativeTransportBackend createNativeBackend(NetBridgeProperties properties) {
         try {
-            var libraryPath = resolveLibraryPath();
+            var libraryPath = resolveLibraryPath(properties);
             return FfmNativeTransportBackend.load(libraryPath, 4);
         } catch (RuntimeException e) {
             return new UnavailableNativeTransportBackend(String.valueOf(e.getMessage()));
         }
     }
 
-    private static Path resolveLibraryPath() {
-        var prop = NativeLibraryResolver.overrideProperty();
-        if (prop != null && !prop.isBlank()) {
-            var p = Path.of(prop);
-            if (!Files.exists(p)) {
+    private static Path resolveLibraryPath(NetBridgeProperties properties) {
+        var overridePath = properties.nativeLibraryPath();
+        if (overridePath != null) {
+            if (!Files.exists(overridePath)) {
                 throw new IllegalStateException(
-                        "netbridge.native.path points to missing library: " + p
+                        NetBridgeProperties.KEY_NATIVE_PATH + " points to missing library: "
+                                + overridePath
                 );
             }
-            return p;
+            return overridePath;
         }
-        return NativeLibraryResolver.extractPackagedLibrary();
+        return NativeLibraryResolver.extractPackagedLibrary(properties.nativeCacheDirectory());
     }
 
     public static synchronized void close() {

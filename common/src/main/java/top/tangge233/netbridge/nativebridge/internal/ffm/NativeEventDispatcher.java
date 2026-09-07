@@ -5,10 +5,8 @@ import top.tangge233.netbridge.nativebridge.NativeEvent;
 import top.tangge233.netbridge.nativebridge.NativeEventListener;
 
 import java.util.concurrent.CopyOnWriteArrayList;
+import org.jspecify.annotations.Nullable;
 
-/**
- * 接收 FFM Upcall 回调并将事件安全分发给已注册监听器的分发器。
- */
 public final class NativeEventDispatcher {
 
     private final CopyOnWriteArrayList<NativeEventListener> listeners = new CopyOnWriteArrayList<>();
@@ -22,9 +20,12 @@ public final class NativeEventDispatcher {
     }
 
     /**
-     * 由 FFM upcall stub 调用的目标方法。
+     * Target method invoked by the FFM upcall stub.
      *
-     * <p>保证内部捕获所有 Throwable，绝对不让异常穿越 FFM boundary。
+     * <p>Raw callback parameters are immediately decoded into a typed event via
+     * {@link FfmAbiCodec}; invalid or unknown shapes are rejected at the boundary (logged and
+     * discarded) and are never propagated as partially valid events. All {@link Throwable}s are
+     * caught internally, ensuring that no exception ever crosses the FFM boundary.
      */
     public void onNativeEvent(
             int eventKind,
@@ -33,25 +34,42 @@ public final class NativeEventDispatcher {
             long arg1
     ) {
         try {
-            var event = new NativeEvent(eventKind, objectId, arg0, arg1);
-            listeners.forEach(listener -> {
-                try {
-                    listener.onEvent(event);
-                } catch (Throwable t) {
-                    NetBridge.LOGGER.error(
-                            "Error in native event listener: {}",
-                            t.getMessage(),
-                            t
-                    );
-                }
-            });
+            var event = FfmAbiCodec.decodeEvent(
+                    eventKind,
+                    objectId,
+                    arg0,
+                    arg1
+            );
+            listeners.forEach(listener -> dispatch(listener, event));
         } catch (Throwable t) {
             NetBridge.LOGGER.error(
-                    "Fatal error in onNativeEvent upcall target: {}",
-                    t.getMessage(),
+                    "Dropping malformed native event kind={} objectId={} arg0={} arg1={}: {}",
+                    eventKind,
+                    objectId,
+                    arg0,
+                    arg1,
+                    safeMessage(t)
+            );
+        }
+    }
+
+    private void dispatch(
+            NativeEventListener listener,
+            NativeEvent event
+    ) {
+        try {
+            listener.onEvent(event);
+        } catch (Throwable t) {
+            NetBridge.LOGGER.error(
+                    "Error in native event listener: {}",
+                    safeMessage(t),
                     t
             );
         }
+    }
+
+    private static @Nullable String safeMessage(Throwable t) {
+        return t.getMessage();
     }
 
 }

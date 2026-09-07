@@ -1,6 +1,5 @@
 package top.tangge233.netbridge.config;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import top.tangge233.netbridge.config.server.ServerConfigStore;
@@ -13,15 +12,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * 服务端配置加载与网络地址解析测试。
- */
 class ServerConfigTest {
-
-    @AfterEach
-    void tearDown() {
-        System.clearProperty(ServerSettingsResolver.PROP_QUIC_PORT);
-    }
 
     @Test
     void loadsDefaultsWhenFileDoesNotExist(@TempDir Path dir) {
@@ -122,16 +113,15 @@ class ServerConfigTest {
         // KCP: disabled by default
         assertFalse(resolved.kcp().enabled());
 
-        // System property override for QUIC port
-        System.setProperty(ServerSettingsResolver.PROP_QUIC_PORT, "28888");
+        // Explicit QUIC port override (injected parsed property)
         var overridden = ServerSettingsResolver.resolve(
                 settings,
                 25565,
-                null
+                null,
+                28888
         );
         assertEquals(28888, overridden.quic().listenPort());
         assertNull(overridden.quic().bindHost());
-        System.clearProperty(ServerSettingsResolver.PROP_QUIC_PORT);
 
         // Test invalid mcPort with -1 follow
         var invalidMcPort = ServerSettingsResolver.resolve(
@@ -140,6 +130,116 @@ class ServerConfigTest {
                 null
         );
         assertFalse(invalidMcPort.quic().enabled(), "MC 端口越界时应禁用该传输");
+    }
+
+    @Test
+    void wrongTypeInOneFieldDoesNotResetOthers(@TempDir Path dir) throws Exception {
+        var serverFile = dir.resolve("server.toml");
+        Files.writeString(
+                serverFile,
+                """
+                        [quic]
+                        enable = "yes"
+                        port = 20000
+                        max_connection = 64
+                        """
+        );
+
+        var store = new ServerConfigStore(serverFile);
+        var settings = store.load();
+
+        assertTrue(settings.quic().enabled(), "enable 非布尔仅回退默认 true，不影响其余字段");
+        assertEquals(20000, settings.quic().port());
+        assertEquals(64, settings.quic().maxConnections());
+    }
+
+    @Test
+    void invalidPortOnlyDefaultsPortField(@TempDir Path dir) throws Exception {
+        var serverFile = dir.resolve("server.toml");
+        Files.writeString(
+                serverFile,
+                """
+                        [quic]
+                        enable = true
+                        port = 999999
+                        max_connection = 32
+                        """
+        );
+
+        var store = new ServerConfigStore(serverFile);
+        var settings = store.load();
+
+        assertEquals(-1, settings.quic().port(), "越界端口只回退该字段默认值");
+        assertEquals(32, settings.quic().maxConnections(), "其它字段不受影响");
+    }
+
+    @Test
+    void invalidMaxConnectionsOnlyDefaultsThatField(@TempDir Path dir) throws Exception {
+        var serverFile = dir.resolve("server.toml");
+        Files.writeString(
+                serverFile,
+                """
+                        [quic]
+                        enable = true
+                        port = 2443
+                        max_connection = 0
+                        """
+        );
+
+        var store = new ServerConfigStore(serverFile);
+        var settings = store.load();
+
+        assertEquals(
+                2443,
+                settings.quic().port()
+        );
+        assertEquals(
+                256,
+                settings.quic().maxConnections(),
+                "max_connection<1 只回退默认值"
+        );
+    }
+
+    @Test
+    void unknownProfileOnlyDefaultsThatField(@TempDir Path dir) throws Exception {
+        var serverFile = dir.resolve("server.toml");
+        Files.writeString(
+                serverFile,
+                """
+                        [kcp]
+                        enable = true
+                        port = 30001
+                        max_connection = 8
+                        profile = "ultra_fast_nonexistent"
+                        """
+        );
+
+        var store = new ServerConfigStore(serverFile);
+        var settings = store.load();
+
+        assertEquals(30001, settings.kcp().port());
+        assertEquals(KcpProfile.BALANCE, settings.kcp().kcpProfile());
+    }
+
+    @Test
+    void unknownTomlKeysAreIgnored(@TempDir Path dir) throws Exception {
+        var serverFile = dir.resolve("server.toml");
+        Files.writeString(
+                serverFile,
+                """
+                        [quic]
+                        enable = true
+                        port = 2443
+                        some_future_key = "abc"
+                        """
+        );
+
+        var store = new ServerConfigStore(serverFile);
+        var settings = store.load();
+
+        assertTrue(settings.quic().enabled());
+        assertEquals(2443, settings.quic().port());
+        assertEquals(256, settings.quic().maxConnections());
     }
 
 }

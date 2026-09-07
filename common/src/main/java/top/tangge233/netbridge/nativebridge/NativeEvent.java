@@ -1,19 +1,49 @@
 package top.tangge233.netbridge.nativebridge;
 
 /**
- * 原生层事件数据载荷。
+ * Typed native event. Raw C callback parameters are decoded into semantic events at the FFM
+ * internal upcall layer, so the application layer does not need to understand the meaning of
+ * {@code arg0}/{@code arg1}.
  */
-public record NativeEvent(
-        int eventKind,
-        long objectId,
-        long arg0,
-        long arg1
-) {
+public sealed interface NativeEvent
+        permits NativeEvent.ConnectionStateChanged,
+        NativeEvent.DataAvailable,
+        NativeEvent.Writable,
+        NativeEvent.Accepted,
+        NativeEvent.ServerStateChanged {
 
-    public static final int KIND_CONNECTION_STATE = 1;
-    public static final int KIND_DATA_AVAILABLE = 2;
-    public static final int KIND_WRITABLE = 3;
-    public static final int KIND_ACCEPTED = 4;
-    public static final int KIND_SERVER_STATE = 5;
+    record ConnectionStateChanged(
+            long connectionId,
+            NativeConnectionState state,
+            NativeFailureReason reason
+    ) implements NativeEvent {
+
+    }
+
+    record DataAvailable(
+            long connectionId
+    ) implements NativeEvent {
+
+    }
+
+    record Writable(
+            long connectionId
+    ) implements NativeEvent {
+
+    }
+
+    record Accepted(
+            long serverId,
+            long connectionId
+    ) implements NativeEvent {
+
+    }
+
+    record ServerStateChanged(
+            long serverId,
+            NativeServerState state
+    ) implements NativeEvent {
+
+    }
 
 }

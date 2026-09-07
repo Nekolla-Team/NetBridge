@@ -1,116 +1,265 @@
 package top.tangge233.netbridge.ability;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import tools.jackson.core.*;
+import tools.jackson.core.json.JsonFactory;
+import top.tangge233.netbridge.transport.AcceleratedTransport;
 
-import java.util.LinkedHashMap;
+import java.io.StringWriter;
+import java.util.EnumMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
-/**
- * networks 能力的 wire v2 编解码：注入与解析 Minecraft status JSON。
- *
- * <p>保持原字段不变，只在顶层追加/读取 networks 对象
- * （原版客户端忽略未知字段）。wire 上只出现解析后的具体端口。
- */
 public final class StatusNetworksCodec {
+
+    private static final String KEY_NETWORKS = "networks";
+    private static final String KEY_ENABLE = "enable";
+    private static final String KEY_HOST = "host";
+    private static final String KEY_PORT = "port";
+    private static final String KEY_PROTOCOL = "protocol";
+
+    private static final JsonFactory FACTORY = JsonFactory.builder()
+            .streamReadConstraints(StreamReadConstraints.builder()
+                    .maxDocumentLength(262_144L)
+                    .maxNestingDepth(64)
+                    .maxTokenCount(32_768L)
+                    .maxNameLength(1_024)
+                    .maxStringLength(262_144)
+                    .maxNumberLength(64)
+                    .build())
+            .build();
 
     private StatusNetworksCodec() {
     }
 
-    /**
-     * 由服务端宣告条目构建 networks JSON 对象。
-     *
-     * @param entries 已解析的传输条目（host=null 的条目省略 host 字段）
-     */
-    public static JsonObject buildNetworks(Map<String, NetworksEntry> entries) {
-        var networks = new JsonObject();
-        entries.forEach((name, entry) -> {
-            if (entry != null && name != null) {
-                networks.add(name, entry.toJson(true));
-            }
-        });
-        return networks;
-    }
-
-    /**
-     * 给服务器列表 Ping 响应 JSON 注入 networks 能力声明。
-     *
-     * @param statusJson 原版 status 编码输出
-     * @param networks   注入对象；无任何条目时不注入（保持原 JSON）
-     *
-     * @return 注入后的 JSON；statusJson 非有效对象或已含 networks 时原样返回
-     */
-    public static String addNetworks(
-            String statusJson,
-            @Nullable JsonObject networks
-    ) {
-        if (networks == null || networks.entrySet().isEmpty()) {
-            return statusJson;
-        }
-
-        JsonObject root;
-        try {
-            root = JsonParser.parseString(statusJson).getAsJsonObject();
-        } catch (RuntimeException e) {
-            return statusJson;
-        }
-
-        if (root.has(NetworksAbility.KEY_NETWORKS)) {
-            return statusJson;
-        }
-
-        root.add(NetworksAbility.KEY_NETWORKS, networks);
-        return root.toString();
-    }
-
-    /**
-     * 从 status JSON 解析 networks 模型（客户端解码侧使用）。
-     *
-     * @return 解析结果；JSON 缺失/损坏时返回 empty，调用方视同服务端未加速
-     */
-    public static NetworksAbility parse(String statusJson) {
-        try {
-            var root = JsonParser.parseString(statusJson).getAsJsonObject();
-            return parse(root);
-        } catch (RuntimeException | StackOverflowError e) {
-            // StackOverflowError：恶意深嵌套 JSON 会让 Gson 递归爆栈；
-            // 吞掉降级为「未宣告」，不能让远程包杀死 netty 解码线程。
+    public static NetworksAbility parse(@Nullable String statusJson) {
+        if (statusJson == null || statusJson.isBlank()) {
             return NetworksAbility.empty();
         }
-    }
 
-    /**
-     * {@link #parse(String)} 的已解析形态：调用方已有 JsonElement 时复用， 避免同一份 status JSON 被解析两遍。
-     */
-    public static NetworksAbility parse(JsonElement parsed) {
-        try {
-            var root = parsed.getAsJsonObject();
-            if (!root.has(NetworksAbility.KEY_NETWORKS)) {
+        try (var parser = FACTORY.createParser(ObjectReadContext.empty(), statusJson)) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) {
                 return NetworksAbility.empty();
             }
 
-            var networks = root.getAsJsonObject(NetworksAbility.KEY_NETWORKS);
-            Map<String, NetworksEntry> entries = new LinkedHashMap<>();
-            networks.entrySet().stream()
-                    .filter(e ->
-                            e.getValue() != null && e.getValue().isJsonObject()
-                    )
-                    .forEach(e -> {
-                        var entry = NetworksEntry.fromJson(
-                                e.getValue().getAsJsonObject()
-                        );
-                        if (entry != null) {
-                            entries.put(e.getKey(), entry);
-                        }
-                    });
+            Map<AcceleratedTransport, NetworksEntry> entries = new EnumMap<>(AcceleratedTransport.class);
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                if (parser.currentToken() != JsonToken.PROPERTY_NAME) {
+                    return NetworksAbility.empty();
+                }
 
-            return entries.isEmpty()
-                    ? NetworksAbility.empty()
-                    : NetworksAbility.of(entries.values().toArray(new NetworksEntry[0]));
-        } catch (RuntimeException | StackOverflowError e) {
+                var propName = parser.currentName();
+                var valToken = parser.nextToken();
+
+                if (KEY_NETWORKS.equals(propName)) {
+                    if (valToken != JsonToken.START_OBJECT) {
+                        // networks is not an object -> empty
+                        return NetworksAbility.empty();
+                    }
+                    parseNetworksObject(parser, entries);
+                } else {
+                    parser.skipChildren();
+                }
+            }
+
+            // Reject trailing content after the single root object.
+            if (parser.nextToken() != null) {
+                return NetworksAbility.empty();
+            }
+
+            return NetworksAbility.of(entries);
+        } catch (Exception e) {
             return NetworksAbility.empty();
+        }
+    }
+
+    private static void parseNetworksObject(
+            JsonParser parser,
+            Map<AcceleratedTransport, NetworksEntry> entries
+    ) throws JacksonException {
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            if (parser.currentToken() != JsonToken.PROPERTY_NAME) {
+                return;
+            }
+
+            var transportName = parser.currentName();
+            var valToken = parser.nextToken();
+
+            var transport = AcceleratedTransport.fromKey(transportName);
+            if (transport == null || valToken != JsonToken.START_OBJECT) {
+                parser.skipChildren();
+                continue;
+            }
+
+            // Parse one transport entry
+            var entry = parseEntryObject(parser, transport);
+            if (entry != null) {
+                entries.put(transport, entry);
+            }
+        }
+    }
+
+    private static @Nullable NetworksEntry parseEntryObject(
+            JsonParser parser,
+            AcceleratedTransport transport
+    ) throws JacksonException {
+        Boolean enabled = null;
+        String host = null;
+        Integer port = null;
+        String protocol = null;
+
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            if (parser.currentToken() != JsonToken.PROPERTY_NAME) {
+                return null;
+            }
+
+            var fieldName = parser.currentName();
+            var fieldToken = parser.nextToken();
+
+            switch (fieldName) {
+                case KEY_ENABLE -> {
+                    if (fieldToken == JsonToken.VALUE_TRUE) {
+                        enabled = true;
+                    } else if (fieldToken == JsonToken.VALUE_FALSE) {
+                        enabled = false;
+                    } else {
+                        // wrong type -> malformed entry, skip children
+                        parser.skipChildren();
+                        enabled = null;
+                    }
+                }
+                case KEY_HOST -> {
+                    if (fieldToken == JsonToken.VALUE_STRING) {
+                        host = parser.getString();
+                    } else if (fieldToken == JsonToken.VALUE_NULL) {
+                        host = null;
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                case KEY_PORT -> {
+                    if (fieldToken == JsonToken.VALUE_NUMBER_INT) {
+                        port = parseIntValue(parser);
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                case KEY_PROTOCOL -> {
+                    if (fieldToken == JsonToken.VALUE_STRING) {
+                        protocol = parser.getString();
+                    } else if (fieldToken == JsonToken.VALUE_NULL) {
+                        protocol = null;
+                    } else {
+                        parser.skipChildren();
+                    }
+                }
+                default -> parser.skipChildren();
+            }
+        }
+
+        // Validate port
+        if (port == null || port < 1 || port > 65535) {
+            return null;
+        }
+
+        // Check protocol exact match against expected protocol
+        if (!transport.protocol().equals(protocol)) {
+            return null;
+        }
+
+        var isEnabled = enabled != null && enabled;
+        if (host != null && host.isBlank()) {
+            host = null;
+        }
+
+        return new NetworksEntry(isEnabled, host, port);
+    }
+
+    private static @Nullable Integer parseIntValue(
+            JsonParser parser
+    ) throws JacksonException {
+        var text = parser.getString();
+        try {
+            return Integer.valueOf(text);
+        } catch (NumberFormatException _) {
+            return null;
+        }
+    }
+
+    public static String addNetworks(
+            @Nullable String originalJson,
+            @Nullable NetworksAbility networks
+    ) {
+        if (originalJson == null) {
+            return "";
+        }
+
+        if (networks == null || networks.entries().isEmpty()) {
+            return originalJson;
+        }
+
+        // Check if root already has "networks" or is not an object or is malformed
+        try (var probe = FACTORY.createParser(ObjectReadContext.empty(), originalJson)) {
+            if (probe.nextToken() != JsonToken.START_OBJECT) {
+                return originalJson;
+            }
+
+            while (probe.nextToken() != JsonToken.END_OBJECT) {
+                if (probe.currentToken() != JsonToken.PROPERTY_NAME) {
+                    return originalJson;
+                }
+
+                var name = probe.currentName();
+                if (KEY_NETWORKS.equals(name)) {
+                    // already has networks property -> never overwrite
+                    return originalJson;
+                }
+                probe.nextToken();
+                probe.skipChildren();
+            }
+        } catch (Exception e) {
+            return originalJson;
+        }
+
+        // Stream-copy root object and append "networks"
+        try {
+            var sw = new StringWriter();
+            try (
+                    var parser = FACTORY.createParser(ObjectReadContext.empty(), originalJson);
+                    var generator = FACTORY.createGenerator(ObjectWriteContext.empty(), sw)
+            ) {
+                if (parser.nextToken() != JsonToken.START_OBJECT) {
+                    return originalJson;
+                }
+
+                generator.writeStartObject();
+
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    var name = parser.currentName();
+                    generator.writeName(name);
+                    parser.nextToken();
+                    generator.copyCurrentStructure(parser);
+                }
+
+                // Append networks
+                generator.writeName(KEY_NETWORKS);
+                generator.writeStartObject();
+                networks.entries().forEach((transport, entry) -> {
+                    generator.writeName(transport.key());
+                    generator.writeStartObject();
+                    generator.writeBooleanProperty(KEY_ENABLE, entry.enabled());
+                    if (entry.host() != null && !entry.host().isBlank()) {
+                        generator.writeStringProperty(KEY_HOST, entry.host());
+                    }
+                    generator.writeNumberProperty(KEY_PORT, entry.port());
+                    generator.writeStringProperty(KEY_PROTOCOL, transport.protocol());
+                    generator.writeEndObject();
+                });
+                generator.writeEndObject();
+                generator.writeEndObject();
+            }
+            return sw.toString();
+        } catch (Exception e) {
+            return originalJson;
         }
     }
 
