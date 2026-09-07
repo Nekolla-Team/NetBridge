@@ -65,7 +65,7 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
     val nativeDir = layout.buildDirectory.dir("native")
 
     inputs.dir(nativeDir).optional(true)
-    outputs.files(nativeDir.map { it.dir("*manifest.json") })
+    outputs.files(nativeDir.map { dir -> dir.asFileTree.matching { include("**/manifest.json") } })
 
     doLast {
         val dir = nativeDir.get().asFile
