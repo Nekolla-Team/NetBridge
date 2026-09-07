@@ -594,11 +594,11 @@ tasks.register<Copy>("assembleAll") {
     dependsOn(verifyArchitecture)
 
     from(fabricJarConfig) {
-        rename { "net-bridge-fabric-${project.version}.jar" }
+        rename { "net-bridge-fabric-${project.version}+${libs.versions.minecraft.get()}.jar" }
     }
 
     from(neoforgeJarConfig) {
-        rename { "net-bridge-neoforge-${project.version}.jar" }
+        rename { "net-bridge-neoforge-${project.version}+${libs.versions.minecraft.get()}.jar" }
     }
 
     into(layout.buildDirectory.dir("libs"))
