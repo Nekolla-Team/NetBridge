@@ -44,7 +44,7 @@ class NativeChannelTest {
         conn.transition(NativeConnectionState.CONNECTED);
         assertTrue(
                 events.active.await(2, TimeUnit.SECONDS),
-                "CONNECTED 事件应激活 channel"
+                "CONNECTED event should activate the channel"
         );
         assertTrue(channel.isActive());
 
@@ -66,7 +66,7 @@ class NativeChannelTest {
         conn.pushData(payload);
         assertTrue(
                 events.read.await(2, TimeUnit.SECONDS),
-                "DATA_AVAILABLE 应驱动读取"
+                "DATA_AVAILABLE should drive reads"
         );
         assertArrayEquals(
                 payload,
@@ -114,11 +114,11 @@ class NativeChannelTest {
                 }).syncUninterruptibly();
         assertFalse(
                 conn.hasOutbound(),
-                "容量不足应保留消息"
+                "Insufficient capacity should retain the message"
         );
         assertFalse(
                 future.isDone(),
-                "WOULD_BLOCK 期间写 future 不应完成"
+                "Write future should remain incomplete while WOULD_BLOCK is active"
         );
 
         conn.unblock();
@@ -159,7 +159,7 @@ class NativeChannelTest {
                 }).syncUninterruptibly();
         assertFalse(
                 channel.isOpen(),
-                "FAILED 应关闭 channel"
+                "FAILED should close the channel"
         );
         assertFalse(channel.isActive());
     }

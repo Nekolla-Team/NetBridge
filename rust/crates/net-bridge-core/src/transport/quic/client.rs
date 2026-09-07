@@ -1,4 +1,4 @@
-//! 客户端 QUIC 连接：异步握手，立即返回连接 id。
+//! Client QUIC connection: performs the handshake asynchronously and returns the connection ID immediately.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use crate::report_error;
 use crate::socket_util;
 use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTING};
 
-/// 经 NativeContext 发起 QUIC 客户端连接。
+/// Starts a QUIC client connection through NativeContext.
 pub fn connect_in_context(
     ctx: &Arc<crate::context::NativeContext>,
     host: &str,
@@ -63,7 +63,8 @@ pub fn connect_in_context(
     Ok(conn_id)
 }
 
-/// 建立连接：解析 → 绑定 → endpoint → 取消感知握手 → 双向流。
+/// Establishes a connection: resolve → bind → endpoint → cancellation-aware handshake → bidirectional
+/// stream.
 async fn establish(
     ctx: &crate::context::NativeContext,
     host: &str,

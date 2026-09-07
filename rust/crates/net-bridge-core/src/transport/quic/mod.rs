@@ -1,4 +1,5 @@
-//! QUIC 传输实现（quinn-plaintext）：客户端、服务端 acceptor 与单连接数据面。
+//! QUIC transport implementation using quinn-plaintext: client, server acceptor, and single-connection
+//! data plane.
 
 mod client;
 pub(crate) mod connection;

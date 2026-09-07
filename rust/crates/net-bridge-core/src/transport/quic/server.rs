@@ -1,4 +1,4 @@
-//! 服务端 QUIC acceptor：endpoint 生命周期与连接 accept。
+//! Server QUIC acceptor: endpoint lifecycle and connection acceptance.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use crate::error::{BridgeError, Transport};
 use crate::socket_util;
 use crate::{ServerHandle, TransportEndpoint, try_admit};
 
-/// 经 NativeContext 启动服务端 QUIC acceptor。
+/// Starts a server QUIC acceptor through NativeContext.
 pub fn start_server_in_context(
     ctx: &Arc<crate::context::NativeContext>,
     port: u16,

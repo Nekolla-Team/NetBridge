@@ -1,4 +1,4 @@
-//! FECStream：可靠流之上的 RS(255,223) 块纠错中间层。
+//! FECStream: an RS(255,223) block error-correction layer above a reliable stream.
 
 use std::io;
 use std::pin::Pin;
@@ -7,11 +7,11 @@ use std::task::Poll;
 use fec::{RsDecoder, RsEncoder};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// RS 码字总长（GF(2^8)，CCSDS 标准 n=255）。
+/// Total RS codeword length (GF(2^8), CCSDS standard n=255).
 pub const CODEWORD_LEN: usize = 255;
-/// RS 消息区长度（k=223）。
+/// RS message-region length (k=223).
 pub const MESSAGE_LEN: usize = 223;
-/// 每块实际载荷上限：消息区前 2 字节为长度前缀。
+/// Maximum payload per block: the first 2 bytes of the message region are a length prefix.
 pub const PAYLOAD_CAP: usize = MESSAGE_LEN - 2;
 
 type Codeword = [u8; CODEWORD_LEN];
@@ -20,21 +20,23 @@ pub struct FecStream<Io> {
     inner: Io,
     encoder: RsEncoder,
     decoder: RsDecoder,
-    // ---- 读侧状态 ----
-    /// 待解码码字累积器。
+    // ---- Read-side state ----
+    /// Accumulator for codewords awaiting decode.
     rcw: Codeword,
     rfill: usize,
-    /// 最近解码出的明文与消费游标（`rplain[rpos..rlen]` 未消费）。
+    /// Most recently decoded plaintext and consumption cursor (`rplain[rpos..rlen]` is unconsumed).
     rplain: [u8; MESSAGE_LEN],
     rpos: usize,
     rlen: usize,
-    /// 毒化标记：RS 解码超限后置位，此后所有操作返回 InvalidData。
+    /// Poison flag set after RS decoding exceeds correction capacity; all later operations return
+    /// InvalidData.
     poisoned: bool,
-    // ---- 写侧状态 ----
-    /// 消息区累积器：`wmsg[..2]` 发块时填长度，载荷自下标 2 起。
+    // ---- Write-side state ----
+    /// Message-region accumulator: `wmsg[..2]` is filled with the length when emitting a block, and
+    /// payload begins at index 2.
     wmsg: [u8; MESSAGE_LEN],
     wfill: usize,
-    /// 待写出码字与偏移（部分写恢复点）；None 表示无在途码字。
+    /// Pending codeword and offset used to resume partial writes; None means no codeword is in flight.
     pending: Option<(Box<Codeword>, usize)>,
 }
 
@@ -56,7 +58,7 @@ impl<Io> FecStream<Io> {
         }
     }
 
-    /// 取出内部流。调用方须保证已 flush/shutdown 后再取。
+    /// Returns the inner stream. The caller must ensure it has been flushed/shut down first.
     pub fn into_inner(self) -> Io {
         self.inner
     }
@@ -357,7 +359,10 @@ pub(crate) mod tests {
         rx.read_exact(&mut got)
             .await
             .expect("recv under corruption");
-        assert_eq!(got, payload, "RS 必须把 ≤t 的损坏原样纠回");
+        assert_eq!(
+            got, payload,
+            "RS must correct corruption up to t symbols back to the original payload"
+        );
     }
 
     #[tokio::test]
@@ -378,7 +383,7 @@ pub(crate) mod tests {
         let res = rx.read(&mut tmp).await;
         assert!(
             matches!(&res, Err(e) if e.kind() == io::ErrorKind::InvalidData),
-            "超限损坏必须 InvalidData，得到 {res:?}"
+            "Corruption beyond the correction limit must return InvalidData; got {res:?}"
         );
     }
 

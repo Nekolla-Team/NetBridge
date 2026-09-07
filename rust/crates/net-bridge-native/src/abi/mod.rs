@@ -1,4 +1,4 @@
-//! C ABI v1 实现与导出。
+//! C ABI v1 implementation and exports.
 
 pub mod api_v1;
 pub mod codec;

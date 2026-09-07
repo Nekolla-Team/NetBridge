@@ -129,7 +129,7 @@ class ServerRuntimeTest {
             ));
             assertTrue(
                     latch.await(3, TimeUnit.SECONDS),
-                    "接受的新连接应交给 adopter"
+                    "Accepted new connection should be handed to the adopter"
             );
             var conn = adopted.get();
             assertNotNull(conn);

@@ -1,58 +1,78 @@
-# 代码写法规范
+# Coding Conventions
 
-重构全程适用；触及的文件一律按本规范清理存量注释。
+These rules apply throughout the refactor. Any touched file must have its existing comments cleaned
+up to conform to this document.
 
-## 注释
+## Comments
 
-- **函数级**：每个函数/方法/公开常量用文档注释（Rust `///`、Java Javadoc）说明用途与参数。 返回值契约（如
-  `0 = 队列满须重试`、`-1 = 非法`）属于接口承诺，必须写在这里。
-- **函数体内**：非必要不加注释。代码自解释；仅在意图无法从代码读出时注释，
-  且只写"为什么"，不复述"做了什么"。
-- **禁止随改动累积注释**：修 bug、重构时不得顺手加入描述本次改动的解释性注释。 设计依据沉淀到
-  `docs/adr` 与 `docs/glossary`，不进函数体。
-- **书面语**：注释禁口语化措辞；内容必须与实际行为一致——行为变更时同步修改或删除， 宁缺勿错。
+- **Function level**: every function/method/public constant should use a documentation comment (Rust
+  `///`, Java Javadoc) to explain purpose and parameters. Return-value contracts such as
+  `0 = queue full, retry required` and `-1 = invalid` are API guarantees and belong here.
+- **Inside function bodies**: avoid comments unless necessary. Code should explain itself; comment
+  only when intent cannot be inferred from the code, and explain **why**, not what the code is
+  visibly doing.
+- **Do not accumulate change-log comments**: bug fixes and refactors must not add explanatory
+  comments describing the current patch. Design rationale belongs in `docs/adr` and `docs/glossary`,
+  not inside function bodies.
+- **Formal written style**: comments must avoid conversational wording and must match actual
+  behavior. Update or delete them when behavior changes; a missing comment is better than a wrong
+  one.
 
-## 文档引用
+## Documentation References
 
-- **源码内禁止出现 ADR / 术语表索引**（如"见 ADR-0007""（ADR-0002）"）。 编号会漂移，索引必然失真；代码不维护指向文档的链接。
-- 跨层语义约定写在函数文档注释中，不借文档编号转述。
+- **Do not put ADR / glossary indexes in source code**, such as "see ADR-0007" or "(ADR-0002)".
+  Numbers drift and links become stale; source code does not maintain document indexes.
+- Cross-layer semantic contracts should be stated directly in function documentation rather than
+  indirectly through document numbers.
 
-## 存量问题
+## Existing Issues
 
-现仓库大量违反本规范：函数体内长段解释、全库散布 ADR 编号引用。
-重构任务清单含"按本规范重写触及文件注释"一项。
+The repository currently violates these conventions in many places, including long explanatory
+blocks inside function bodies and ADR-number references scattered across source files. The refactor
+task list includes an explicit item to rewrite comments in touched files according to these rules.
 
-## Java 域模型约定（本轮现代化新增）
+## Java Domain-Model Conventions (Added in the Current Modernization)
 
-以下约定由 `verifyArchitecture` 的部分守卫强制；`docs/adr/0012` 记录其设计依据。
+Some of the following rules are enforced by `verifyArchitecture`; their design rationale is recorded
+in `docs/adr/0012`.
 
-- **JSON 边界归属**：`common` 的 JSON 读写只发生在 codec 类型内 （`ability/StatusNetworksCodec`、
-  `nativebridge/internal/ffm/NativeManifestCodec`）， 使用 Jackson Core 3 streaming API。域/公共类型不得
-  import
-  `tools.jackson.*` 或 `com.google.gson`；守卫按文件白名单放行。
-- **域 API 不暴露 JSON 类型**：公共/域方法签名中不得出现 Jackson/Gson 类型；模型是自有 record，与 wire
-  形态解耦。Gson 只允许在共享 Minecraft 层（Mojang codec/DFU 边界）使用。
-- **语义枚举不存 ABI 数值**：`NativeTransportKind`、`NativeConnectionState`、
-  `NativeFailureReason`、`NativeKcpProfile` 是纯语义枚举；所有 C ABI 整数映射集中在
-  `internal/ffm/FfmAbiCodec`（或 `FfmApiLayouts`/`FfmStatus`）。
-- **Java 超时 API 用 `Duration`**：对外超时/退避参数与常量用 `java.time.Duration`， 仅在 Netty
-  调度等叶子处换算为毫秒。
-- **纯计时用单调时钟**：过期判断/超时预算等“经过时长”用 `System.nanoTime`（或可注入
-  `LongSupplier`）；墙钟只用于展示。
-- **线程局部上下文优先 ScopedValue**：调用栈内一次性标志（如连接拦截/bypass）用
-  `ScopedValue` 绑定，随栈展开、不泄漏。静态 `ThreadLocal` 仅限架构守卫白名单的 临时捕获槽（
-  `StatusNetworksCapture`）。
-- **配置提取逐字段类型化**：NightConfig 读取经类型检查 helper；单字段缺失/错型/越界只
-  回退该字段并告警，禁止整文件回退默认。配置写入使用原子保存（临时文件 + force + ATOMIC_MOVE 回退）。
-- **record 构造器显式不变式**：record compact 构造器负责非空/非空白/范围校验，把
-  “永远成立”的约束写进类型本身，而非散落在调用处。
+- **JSON boundary ownership**: JSON reads/writes in `common` occur only inside codec types
+  (`ability/StatusNetworksCodec` and
+  `nativebridge/internal/ffm/NativeManifestCodec`) using the Jackson Core 3 streaming API.
+  Domain/public types must not import
+  `tools.jackson.*` or `com.google.gson`; guards allow only the explicit file allowlist.
+- **Domain APIs do not expose JSON types**: public/domain method signatures must not contain
+  Jackson/Gson types. Models are project-owned records decoupled from wire shape. Gson is allowed
+  only in the shared Minecraft layer at Mojang codec/DFU boundaries.
+- **Semantic enums do not store ABI values**: `NativeTransportKind`, `NativeConnectionState`,
+  `NativeFailureReason`, and `NativeKcpProfile`
+  are purely semantic enums. All C ABI integer mapping is centralized in `internal/ffm/FfmAbiCodec`
+  (or `FfmApiLayouts`/`FfmStatus`).
+- **Use `Duration` for Java timeout APIs**: externally visible timeout/backoff parameters and
+  constants use `java.time.Duration` and are converted to milliseconds only at leaves such as Netty
+  scheduling.
+- **Use a monotonic clock for elapsed time**: expiration tests and timeout budgets use
+  `System.nanoTime` (or an injectable `LongSupplier`); wall clock is only for presentation.
+- **Prefer ScopedValue for call-local context**: one-shot flags scoped to a call stack, such as
+  connection interception/bypass, use `ScopedValue` bindings that unwind with the stack and cannot
+  leak. Static `ThreadLocal` is allowed only for temporary capture slots on the architecture-guard
+  allowlist (`StatusNetworksCapture`).
+- **Extract configuration fields with typed validation**: NightConfig reads go through type-checking
+  helpers. A missing/wrong-type/out-of-range field falls back only that field with a warning; never
+  reset the whole file to defaults. Configuration writes use atomic saving (temporary file + force +
+  ATOMIC_MOVE fallback).
+- **Record constructors enforce explicit invariants**: compact record constructors validate
+  non-null/nonblank/range requirements so "always true" constraints live in the type rather than at
+  scattered call sites.
 
-## 生成物（generated artifact）
+## Generated Artifacts
 
-`rust/crates/net-bridge-native/include/netbridge.h` 是由固定版本 cbindgen 从 Rust ABI 源真相 （
-`rust/crates/net-bridge-native/src/abi/`）生成的产物，并随仓库提交：
+`rust/crates/net-bridge-native/include/netbridge.h` is generated by a pinned cbindgen version from
+the Rust ABI source of truth (`rust/crates/net-bridge-native/src/abi/`) and is committed to the
+repository:
 
-- **禁止手工编辑 `netbridge.h`**；手工改动由 CI drift gate 拒绝。
-- 需要改 ABI 时只改 Rust ABI 源文件。
-- 更新：`./gradlew updateNativeHeader`（或 `cd rust && cargo xtask abi-header update`）。
-- 提交前若 ABI 有变更，先跑 `./gradlew verifyNativeHeader`（或 `cargo xtask abi-header check`）。
+- **Do not edit `netbridge.h` manually**; the CI drift gate rejects manual changes.
+- Change only the Rust ABI source files when modifying the ABI.
+- Update with `./gradlew updateNativeHeader` (or `cd rust && cargo xtask abi-header update`).
+- Before committing ABI changes, run `./gradlew verifyNativeHeader` (or
+  `cargo xtask abi-header check`).

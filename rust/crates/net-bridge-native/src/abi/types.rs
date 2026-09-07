@@ -1,7 +1,7 @@
-//! C ABI v1 类型与结构体定义。
+//! C ABI v1 type and struct definitions.
 //!
-//! 这是 `netbridge.h` 的权威来源：cbindgen 从本模块生成
-//! `include/netbridge.h`（见 `cargo xtask abi-header update`）。
+//! This is the authoritative source for `netbridge.h`: cbindgen generates `include/netbridge.h` from
+//! this module (see `cargo xtask abi-header update`).
 
 use super::status::NbStatus;
 use net_bridge_core::NativeContext;
@@ -89,8 +89,8 @@ pub type NbConnection = u64;
 /// Fixed-width server handle, scoped to the owning native context.
 pub type NbServer = u64;
 
-/// Borrowed UTF-8 payload view. `data` is only valid for the duration of the
-/// downcall that produced it; `length == 0` with `data == NULL` is empty.
+/// Borrowed UTF-8 payload view. `data` is only valid for the duration of the downcall that produced it;
+/// `length == 0` with `data == NULL` is empty.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NbBytesViewV1 {
@@ -104,10 +104,9 @@ pub struct NbBytesViewV1 {
 
 /// Fixed binary socket address.
 ///
-/// `family` is 4 (IPv4) or 6 (IPv6). `port` is in host byte order.
-/// For IPv4 the first 4 bytes of `address` hold the address and `scope_id`
-/// is always zero; for IPv6 all 16 bytes hold the address and `scope_id`
-/// carries the interface scope id.
+/// `family` is 4 (IPv4) or 6 (IPv6). `port` is in host byte order. For IPv4 the first 4 bytes of
+/// `address` hold the address and `scope_id` is always zero; for IPv6 all 16 bytes hold the address and
+/// `scope_id` carries the interface scope id.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NbSocketAddressV1 {
@@ -145,8 +144,8 @@ pub struct NbContextOptionsV1 {
 
 /// Event callback invoked on native worker threads.
 ///
-/// It must decode its primitive arguments and return quickly without
-/// blocking. NULL is not a valid `on_event`.
+/// It must decode its primitive arguments and return quickly without blocking. NULL is not a valid
+/// `on_event`.
 pub type NbEventCallbackV1 =
     Option<unsafe extern "C" fn(event_kind: u32, object_id: u64, arg0: i64, arg1: i64)>;
 
@@ -214,8 +213,8 @@ pub struct NbServerOptionsV1 {
 
 /// Versioned function table returned by `netbridge_get_api`.
 ///
-/// The struct is append-only: new functions are only ever added to the
-/// trailing reserved area across minor revisions.
+/// The struct is append-only: new functions are only ever added to the trailing reserved area across
+/// minor revisions.
 #[repr(C)]
 pub struct NbApiV1 {
     /// ABI major version implemented by this table.

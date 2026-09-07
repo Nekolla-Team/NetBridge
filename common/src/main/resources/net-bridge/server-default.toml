@@ -1,39 +1,42 @@
-# net-bridge 服务端配置（首次启动自动生成本文件，可直接编辑）
+# net-bridge server configuration (generated automatically on first startup; safe to edit directly)
 
 [quic]
 
-# 是否启用 QUIC 传输
+# Whether to enable QUIC transport
 enable = true
 
-# QUIC 监听端口：-1 跟随 Minecraft TCP 端口；0 随机分配（实际端口见启动日志）；1-65535 固定端口
+# QUIC listen port: -1 follows the Minecraft TCP port; 0 picks a random port (see startup logs for
+# the actual port); 1-65535 uses a fixed port
 port = -1
 
-# 下发进列表 Ping 的地址：留空 = 跟随服务器地址（客户端直连你公开的 IP/域名时保持留空）
+# Address advertised in server-list ping: empty = follow the server address (leave empty when
+# clients connect directly to your public IP/domain)
 host = ""
 
-# QUIC 监听地址：空 = 跟随 server.properties 的 server-ip（再回退全部网卡）；
-# IP 字面量（如 "0.0.0.0"、"::1"）限定单网卡
+# QUIC listen address: empty = follow server.properties server-ip, then fall back to all interfaces;
+# An IP literal such as "0.0.0.0" or "::1" restricts the listener to that interface
 bind = ""
 
-# 本传输最大并发连接数（超限的新连接被静默丢弃，防 UDP 反射滥用）
+# Maximum concurrent connections for this transport (excess new connections are silently dropped to
+# prevent UDP reflection abuse)
 max_connection = 256
 
 [kcp]
 
-# 是否启用 KCP 传输（默认关闭，按需启用）
+# Whether to enable KCP transport (disabled by default; enable as needed)
 enable = false
 
-# KCP 监听端口：-1 = Minecraft TCP 端口 + 1；其余语义与 quic.port 一致
+# KCP listen port: -1 = Minecraft TCP port + 1; all other semantics match quic.port
 port = -1
 
-# 下发进列表 Ping 的地址：留空 = 跟随服务器地址
+# Address advertised in server-list ping: empty = follow the server address
 host = ""
 
-# 监听地址，语义同 [quic] bind
+# Listen address; semantics are the same as [quic] bind
 bind = ""
 
-# 本传输最大并发连接数
+# Maximum concurrent connections for this transport
 max_connection = 256
 
-# 参数档：balance（默认）/ aggressive（高丢包链路换延迟）
+# Profile: balance (default) / aggressive (trades bandwidth for latency on lossy paths)
 profile = "balance"

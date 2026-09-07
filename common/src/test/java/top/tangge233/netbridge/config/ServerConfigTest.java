@@ -25,11 +25,17 @@ class ServerConfigTest {
         assertNull(settings.quic().bindHost());
         assertEquals(256, settings.quic().maxConnections());
 
-        assertFalse(settings.kcp().enabled(), "KCP 默认关闭");
+        assertFalse(
+                settings.kcp().enabled(),
+                "KCP should be disabled by default"
+        );
         assertEquals(-1, settings.kcp().port());
         assertEquals(KcpProfile.BALANCE, settings.kcp().kcpProfile());
 
-        assertTrue(Files.exists(serverFile), "加载时应自动从模板释放生成 server.toml");
+        assertTrue(
+                Files.exists(serverFile),
+                "Loading should generate server.toml from the template automatically"
+        );
     }
 
     @Test
@@ -66,7 +72,10 @@ class ServerConfigTest {
 
         assertTrue(settings.kcp().enabled());
         assertEquals(30000, settings.kcp().port());
-        assertNull(settings.kcp().advertisedHost(), "空串归一化为 null");
+        assertNull(
+                settings.kcp().advertisedHost(),
+                "Empty string should normalize to null"
+        );
         assertEquals("192.168.1.100", settings.kcp().bindHost());
         assertEquals(8, settings.kcp().maxConnections());
         assertEquals(KcpProfile.AGGRESSIVE, settings.kcp().kcpProfile());
@@ -82,7 +91,10 @@ class ServerConfigTest {
 
         assertTrue(settings.quic().enabled());
         assertEquals(256, settings.quic().maxConnections());
-        assertFalse(settings.kcp().enabled(), "缺 enable 默认 false");
+        assertFalse(
+                settings.kcp().enabled(),
+                "Missing enable should default to false"
+        );
         assertEquals(KcpProfile.BALANCE, settings.kcp().kcpProfile());
     }
 
@@ -129,7 +141,10 @@ class ServerConfigTest {
                 70000,
                 null
         );
-        assertFalse(invalidMcPort.quic().enabled(), "MC 端口越界时应禁用该传输");
+        assertFalse(
+                invalidMcPort.quic().enabled(),
+                "Transport should be disabled when the MC port is out of range"
+        );
     }
 
     @Test
@@ -148,7 +163,10 @@ class ServerConfigTest {
         var store = new ServerConfigStore(serverFile);
         var settings = store.load();
 
-        assertTrue(settings.quic().enabled(), "enable 非布尔仅回退默认 true，不影响其余字段");
+        assertTrue(
+                settings.quic().enabled(),
+                "Non-boolean enable should fall back only to default true without affecting other fields"
+        );
         assertEquals(20000, settings.quic().port());
         assertEquals(64, settings.quic().maxConnections());
     }
@@ -169,8 +187,12 @@ class ServerConfigTest {
         var store = new ServerConfigStore(serverFile);
         var settings = store.load();
 
-        assertEquals(-1, settings.quic().port(), "越界端口只回退该字段默认值");
-        assertEquals(32, settings.quic().maxConnections(), "其它字段不受影响");
+        assertEquals(
+                -1,
+                settings.quic().port(),
+                "Out-of-range port should fall back only that field to its default"
+        );
+        assertEquals(32, settings.quic().maxConnections(), "Other fields should remain unaffected");
     }
 
     @Test
@@ -196,7 +218,7 @@ class ServerConfigTest {
         assertEquals(
                 256,
                 settings.quic().maxConnections(),
-                "max_connection<1 只回退默认值"
+                "max_connection<1 should fall back only to the default value"
         );
     }
 

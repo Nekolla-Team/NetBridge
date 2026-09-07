@@ -1,4 +1,5 @@
-//! KCP 客户端：异步建连（kcp-rs 内建 SYN 握手），立即返回连接 id。
+//! KCP client: establishes connections asynchronously using the built-in kcp-rs SYN handshake and
+//! returns the connection ID immediately.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use crate::report_error;
 use crate::socket_util;
 use crate::{Command, ConnHandle, STATE_CONNECTING};
 
-/// 经 NativeContext 发起 KCP 客户端连接。
+/// Starts a KCP client connection through NativeContext.
 pub fn connect_in_context(
     ctx: &Arc<crate::context::NativeContext>,
     host: &str,

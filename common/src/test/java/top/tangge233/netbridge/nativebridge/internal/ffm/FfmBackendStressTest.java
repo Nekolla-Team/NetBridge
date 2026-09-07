@@ -85,7 +85,7 @@ class FfmBackendStressTest {
 
             assertTrue(
                     drainRequested.await(10, TimeUnit.SECONDS),
-                    "至少应收到一次 DATA_AVAILABLE 事件（事件允许合并）"
+                    "At least one DATA_AVAILABLE event should be received (events may be coalesced)"
             );
 
             var received = ByteBuffer.allocate(CHUNK_BYTES);
@@ -97,7 +97,7 @@ class FfmBackendStressTest {
                     for (var i = 0; i < res.bytes(); i++) {
                         assertEquals(
                                 (byte) ((got + i) % CHUNK_BYTES & 0xFF), received.get(i),
-                                "字节流错位 at " + (got + i)
+                                "Byte stream mismatch at " + (got + i)
                         );
                     }
                     got += res.bytes();
@@ -106,7 +106,11 @@ class FfmBackendStressTest {
                     Thread.sleep(5);
                 }
             }
-            assertEquals(total, got, "回调风暴下必须无丢字节数");
+            assertEquals(
+                    total,
+                    got,
+                    "No bytes may be lost during a callback storm"
+            );
 
             server.close();
             client.close();
@@ -125,7 +129,7 @@ class FfmBackendStressTest {
         assertEquals(
                 want,
                 conn.state(),
-                "等待连接状态 " + want + " 超时"
+                "Timed out waiting for connection state " + want
         );
     }
 
@@ -176,7 +180,10 @@ class FfmBackendStressTest {
                     sent += res.bytes();
                 }
             }
-            assertTrue(blocked, "填满写队列后必须出现 WOULD_BLOCK");
+            assertTrue(
+                    blocked,
+                    "WOULD_BLOCK must occur after the write queue is filled"
+            );
 
             var readBuf = ByteBuffer.allocate(64 * 1024);
             var drained = 0L;
@@ -193,18 +200,18 @@ class FfmBackendStressTest {
             assertEquals(
                     sent,
                     drained,
-                    "回压期间不得丢字节"
+                    "No bytes may be lost during backpressure"
             );
 
             assertTrue(
                     writable.await(30, TimeUnit.SECONDS),
-                    "队列恢复空间后必须收到 WRITABLE 事件"
+                    "WRITABLE event must be received after queue capacity recovers"
             );
 
             var after = client.write(ByteBuffer.wrap(new byte[1024]));
             assertTrue(
                     after.progressed(),
-                    "WRITABLE 后写应恢复"
+                    "Writes should resume after WRITABLE"
             );
 
             server.close();

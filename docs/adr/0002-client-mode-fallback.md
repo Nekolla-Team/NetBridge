@@ -1,31 +1,38 @@
-# ADR-0002: 客户端传输模式与 TCP 降级
+# ADR-0002: Client Transport Modes and TCP Fallback
 
-状态：已接受 · 日期：2026-08-25
+Status: Accepted · Date: 2026-08-25
 
-## 背景
+## Context
 
-客户端需在 tcp / quic / kcp 间选择。非 TCP 传输可能被防火墙/ISP 掐断 UDP（黑洞），
-必须定义可预期的降级行为，否则玩家面对无限连接失败。
+The client must choose among tcp / quic / kcp. Non-TCP transports may have UDP blocked by firewalls
+or ISPs (a black-hole path), so predictable fallback behavior is required; otherwise players can be
+left with indefinite connection failures.
 
-## 决策
+## Decision
 
-- **三档模式**：`tcp` / `quic` / `kcp`。不存在独立的 *-fallback-tcp 档：
-  quic/kcp 天生内置 TCP 降级；tcp 即纯 TCP，无降级概念。
-- **尝试序列**（单次连接流程内）：目标传输至多尝试 **2 次**——第 1 次握手超时 **10 s**
-  （冷启动），第 2 次 **20 s**；两次均失败 ⇒ 本次连接改走 TCP。native 报 FAILED/CLOSED
-  视同当次立即失败，不等超时。tcp 直连不走此序列。
-- **超时实现**：Java `HandshakeWatchdog` 定时任务竞速 connect promise——两栈均无可用原生
-  握手超时，此为唯一可行方案（证据与约束见 ADR-0008）。
-- **降级记忆优先于尝试序列**：`FallbackTracker` 命中（该服务器 5 min 内发生过降级）⇒
-  直接走 TCP，不发起任何加速尝试；TTL 过期后重新执行完整序列。
-- GUI tooltip 固定说明"握手失败 2 次后自动降级到 TCP"。
+- **Three modes**: `tcp` / `quic` / `kcp`. There is no separate *-fallback-tcp mode:
+  quic/kcp include TCP fallback by design; tcp is plain TCP and has no fallback concept.
+- **Attempt sequence** within one connection flow: the selected transport is attempted at most **2
+  times** — the first handshake times out after **10 s**
+  (cold start), and the second after **20 s**; if both fail, that connection switches to TCP. Native
+  FAILED/CLOSED counts as an immediate failure of that attempt rather than waiting for the timeout.
+  Direct tcp connections do not use this sequence.
+- **Timeout implementation**: a Java `HandshakeWatchdog` scheduled task races the connect promise.
+  Neither transport stack provides a usable native handshake timeout for the required behavior, so
+  this is the only viable solution (see ADR-0008 for evidence and constraints).
+- **Fallback memory takes precedence over the attempt sequence**: if `FallbackTracker` hits for a
+  server that fell back within the previous 5 min, use TCP directly without any accelerated attempt;
+  after the TTL expires, run the full sequence again.
+- The GUI tooltip consistently states that the client "automatically falls back to TCP after 2
+  failed handshakes."
 
-## 后果
+## Consequences
 
-- `TransportMode` 收敛为 TCP/QUIC/KCP 三值。
-- 需要 Java 侧握手表计时器（10s/20s），不能裸等 native `connectionState`。
+- `TransportMode` is reduced to the three values TCP/QUIC/KCP.
+- Java needs handshake timers (10s/20s); it cannot wait indefinitely on native `connectionState`.
 
-## 补充决策（第二轮拷问定稿）
+## Supplemental Decision (Finalized After Second Review)
 
-- **mode 与宣告不匹配**：所选传输未被服务端宣告（或 protocol 不在支持集）→ **直接走 TCP**，
-  不尝试其他加速传输；优先级协商不存在。
+- **Mode/announcement mismatch**: if the selected transport is not announced by the server (or its
+  protocol is unsupported), **use TCP directly**. Do not try a different accelerated transport;
+  there is no priority negotiation.

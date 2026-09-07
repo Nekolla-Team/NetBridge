@@ -1,4 +1,4 @@
-//! C ABI 布局与契约测试。
+//! C ABI layout and contract tests.
 
 use std::mem::{offset_of, size_of};
 use std::ptr;
@@ -17,7 +17,7 @@ unsafe extern "C" fn test_on_event(_kind: u32, _obj: u64, _a0: i64, _a1: i64) {
 
 #[test]
 fn abi_struct_sizes_and_offsets() {
-    // 验证基本字段偏移和尺寸
+    // Verify basic field offsets and sizes
     assert_eq!(size_of::<NbBytesViewV1>(), 16);
     assert_eq!(offset_of!(NbBytesViewV1, data), 0);
     assert_eq!(offset_of!(NbBytesViewV1, length), 8);
@@ -60,7 +60,7 @@ fn abi_struct_sizes_and_offsets() {
 fn get_api_bootstrap_negotiation() {
     let mut api_ptr: *const NbApiV1 = ptr::null();
 
-    // 正常获取
+    // Successful retrieval
     let res = unsafe { netbridge_get_api(1, 0, &mut api_ptr) };
     assert_eq!(res, NB_OK);
     assert!(!api_ptr.is_null());
@@ -70,16 +70,16 @@ fn get_api_bootstrap_negotiation() {
     assert_eq!(api.abi_minor, 0);
     assert_eq!(api.struct_size, size_of::<NbApiV1>() as u32);
 
-    // major 不匹配
+    // Major mismatch
     let mut bad_ptr: *const NbApiV1 = ptr::null();
     let res_major = unsafe { netbridge_get_api(2, 0, &mut bad_ptr) };
     assert_eq!(res_major, NB_ABI_MISMATCH);
 
-    // minor 过高
+    // Requested minor is too high
     let res_minor = unsafe { netbridge_get_api(1, 99, &mut bad_ptr) };
     assert_eq!(res_minor, NB_ABI_MISMATCH);
 
-    // null 参数
+    // Null argument
     let res_null = unsafe { netbridge_get_api(1, 0, ptr::null_mut()) };
     assert_eq!(res_null, NB_INVALID_ARGUMENT);
 }
@@ -90,7 +90,7 @@ fn c_abi_quic_loopback_roundtrip() {
     assert_eq!(unsafe { netbridge_get_api(1, 0, &mut api_ptr) }, NB_OK);
     let api = unsafe { &*api_ptr };
 
-    // 1. 创建 Context
+    // 1. Create Context
     let callbacks = NbCallbacksV1 {
         struct_size: size_of::<NbCallbacksV1>() as u32,
         reserved0: 0,
@@ -102,7 +102,7 @@ fn c_abi_quic_loopback_roundtrip() {
     assert_eq!(res_ctx, NB_OK);
     assert!(!ctx.is_null());
 
-    // 2. 启动服务端
+    // 2. Start server
     let server_opts = NbServerOptionsV1 {
         struct_size: size_of::<NbServerOptionsV1>() as u32,
         transport_kind: NB_TRANSPORT_QUIC,
@@ -133,7 +133,7 @@ fn c_abi_quic_loopback_roundtrip() {
     );
     assert_ne!(port, 0);
 
-    // 3. 客户端发起连接
+    // 3. Client initiates connection
     let host = b"127.0.0.1";
     let connect_opts = NbConnectOptionsV1 {
         struct_size: size_of::<NbConnectOptionsV1>() as u32,
@@ -156,7 +156,7 @@ fn c_abi_quic_loopback_roundtrip() {
     );
     assert_ne!(client_id, 0);
 
-    // 4. 等待连接成功
+    // 4. Wait for successful connection
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let mut state: u32 = 0;
@@ -168,7 +168,7 @@ fn c_abi_quic_loopback_roundtrip() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // 5. 写入与读取
+    // 5. Write and read
     let msg = b"hello c abi ffm poc";
     let mut written: u32 = 0;
     assert_eq!(
@@ -185,7 +185,7 @@ fn c_abi_quic_loopback_roundtrip() {
     );
     assert_eq!(written, msg.len() as u32);
 
-    // 6. 关闭与销毁
+    // 6. Close and destroy
     assert_eq!(
         unsafe { (api.connection_close.unwrap())(ctx, client_id) },
         NB_OK

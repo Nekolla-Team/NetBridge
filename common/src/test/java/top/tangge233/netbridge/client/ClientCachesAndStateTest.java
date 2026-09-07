@@ -30,7 +30,7 @@ class ClientCachesAndStateTest {
                 ));
         assertTrue(
                 cache.get(addr(1001)).entries().isEmpty(),
-                "LRU 逐出最久未用"
+                "LRU should evict the least recently used entry"
         );
         assertFalse(cache.get(addr(1300)).entries().isEmpty());
         cache.clear();
@@ -212,13 +212,13 @@ class ClientCachesAndStateTest {
 
         assertTrue(
                 cache.lookup(key, TransportMode.KCP).isEmpty(),
-                "mode 不同不得命中"
+                "Different modes must not hit the same entry"
         );
 
         now.addAndGet(5001);
         assertTrue(
                 cache.lookup(key, TransportMode.QUIC).isEmpty(),
-                "TTL 过期后命中失效"
+                "Entry should no longer hit after TTL expiry"
         );
     }
 
@@ -245,7 +245,7 @@ class ClientCachesAndStateTest {
         assertEquals(
                 2222,
                 cache.lookup(key, TransportMode.QUIC).orElseThrow().address().getPort(),
-                "后写覆盖先写"
+                "Later writes should overwrite earlier writes"
         );
         cache.invalidate(key);
         assertTrue(cache.lookup(key, TransportMode.QUIC).isEmpty());

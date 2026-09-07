@@ -1,49 +1,54 @@
-# ADR-0007: 模块划分与 JNI 命名去协议化
+# ADR-0007: Module Layout and Protocol-Neutral JNI Naming
 
-状态：已被 ADR-0011 取代 · 日期：2026-08-25 · 取代：pre-refactor 注释中 ADR-0006 的双副本约定表述（副本策略本身保留）
+Status: Superseded by ADR-0011 · Date: 2026-08-25 · Supersedes: the dual-copy convention wording
+from ADR-0006 in pre-refactor comments (the copy strategy itself remains)
 
-## 背景
+## Context
 
-KCP 加入后，`QuicNative` / `QuicChannel` 等 QUIC 专名名不副实；能力解析、模式决策、 降级状态机混在 `net`
-单层包里。重构按职责重新划层。
+After adding KCP, QUIC-specific names such as `QuicNative` / `QuicChannel` no longer describe their
+role accurately; capability parsing, mode decisions, and fallback state logic are mixed together in
+a flat `net` package. The refactor reorganizes responsibilities into layers.
 
-## 决策
+## Decision
 
-### Java（common）
+### Java (common)
 
 ```
 top.tangge233.netbridge
-├── jni/          NativeBridge（原 QuicNative）、NativeLoader、NativeConnState
-├── ability/      NetworksAbility、NetworksEntry(enable/host/port/protocol)、
-│                 StatusNetworksCodec(wire v2 注入/解析)、TransportProtocol(版本串常量+支持集比对)
-├── transport/    TransportMode(tcp/quic/kcp)、ClientConfig(client.toml)、
-│                 KcpProfile(balance/aggressive)、HandshakeWatchdog(10s/20s)、
-│                 FallbackTracker(TTL 5min)、TransportSelector(决策入口)
-├── channel/      NativeChannel(原 QuicChannel，协议无关)
-└── server/       ServerConfig(server.toml [quic]/[kcp])、NativeAcceptor
+├── jni/          NativeBridge (formerly QuicNative), NativeLoader, NativeConnState
+├── ability/      NetworksAbility, NetworksEntry(enable/host/port/protocol),
+│                 StatusNetworksCodec(wire v2 injection/parsing), TransportProtocol(version constants + supported-set matching)
+├── transport/    TransportMode(tcp/quic/kcp), ClientConfig(client.toml),
+│                 KcpProfile(balance/aggressive), HandshakeWatchdog(10s/20s),
+│                 FallbackTracker(TTL 5min), TransportSelector(decision entry point)
+├── channel/      NativeChannel (formerly QuicChannel, protocol-neutral)
+└── server/       ServerConfig(server.toml [quic]/[kcp]), NativeAcceptor
 ```
 
-### Rust（net-bridge-native）
+### Rust (net-bridge-native)
 
 ```
 src/
 ├── transport.rs      trait Transport { connect/accept/state/read/write/close }
-├── bridge/mod.rs     句柄注册表（传输无关 id）、server/client 门面
-├── bridge/quic/      quinn-plaintext 实现
-└── bridge/kcp/       fec_stream + kcp-rs + smux（现结构保留）
+├── bridge/mod.rs     handle registry (protocol-independent IDs), server/client facade
+├── bridge/quic/      quinn-plaintext implementation
+└── bridge/kcp/       fec_stream + kcp-rs + smux (existing structure retained)
 ```
 
-JNI 导出层只做参数转换，业务在 `bridge` 门面后；两协议经 `dyn Transport` 分派。
+The JNI export layer performs only argument conversion; business logic lives behind the `bridge`
+facade, and both protocols dispatch through `dyn Transport`.
 
 ### ABI
 
-- 类更名 ⇒ 导出符号变 `Java_top_tangge233_netbridge_jni_NativeBridge_*`。
-- ABI 版本 `0.1.0` → `0.2.0`；加载时不匹配即拒绝（Alpha 无兼容负担）。
+- Class rename ⇒ exported symbols become `Java_top_tangge233_netbridge_jni_NativeBridge_*`.
+- ABI version `0.1.0` → `0.2.0`; reject loading on mismatch (Alpha has no compatibility burden).
 
-### 平台层（fabric/neoforge）
+### Platform Layer (fabric/neoforge)
 
-双源码副本策略保留；mixin 仅做挂载点，逻辑全部下沉 common。
+Keep the duplicated-source strategy; mixins provide only attachment points, with all logic pushed
+down into common.
 
-## 后果
+## Consequences
 
-- 新传输接入 = 实现 `Transport` trait + ability 条目 + TransportMode 枚举值，不动框架。
+- Adding a transport means implementing the `Transport` trait plus adding an ability entry and a
+  TransportMode enum value, without changing the framework.

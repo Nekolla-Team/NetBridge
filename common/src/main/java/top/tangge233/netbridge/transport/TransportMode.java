@@ -4,10 +4,10 @@ import java.util.Locale;
 import org.jspecify.annotations.Nullable;
 
 /**
- * 客户端传输模式三档。
+ * The three client transport modes.
  *
- * <p>quic/kcp 内置 TCP 降级（握手两次失败自动回退）；tcp 即纯 TCP，
- * 无降级概念。不存在独立的 *-fallback-tcp 档。
+ * <p>quic/kcp include built-in TCP fallback after two failed handshakes; tcp is plain TCP
+ * and has no fallback concept. There is no separate *-fallback-tcp mode.
  */
 public enum TransportMode {
 
@@ -16,7 +16,9 @@ public enum TransportMode {
     KCP;
 
     /**
-     * 解析配置串；未知值返回 null（调用方回退默认 TCP）。 旧取值（quic-only/quic-fallback 等）不迁移，一律视为未配置。
+     * Parses a configuration value. Unknown values return null so the caller can fall back to the
+     * default TCP mode. Legacy values such as quic-only/quic-fallback are not migrated and are
+     * treated as unset.
      */
     public static @Nullable TransportMode parse(@Nullable String value) {
         return value == null
@@ -29,7 +31,7 @@ public enum TransportMode {
                 };
     }
 
-    /** 配置文件与系统属性中的小写标识。 */
+    /** Lowercase identifier used by configuration files and system properties. */
     public String configValue() {
         return name().toLowerCase(Locale.ROOT);
     }

@@ -1,4 +1,4 @@
-//! NbApiV1 函数表实现与 netbridge_get_api 导出。
+//! NbApiV1 function-table implementation and netbridge_get_api export.
 
 use std::mem::size_of;
 use std::slice;
