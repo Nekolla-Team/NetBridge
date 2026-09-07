@@ -221,8 +221,8 @@ typedef struct {
 /*
  Event callback invoked on native worker threads.
 
- It must decode its primitive arguments and return quickly without
- blocking. NULL is not a valid `on_event`.
+ It must decode its primitive arguments and return quickly without blocking. NULL is not a valid
+ `on_event`.
  */
 typedef void (*nb_event_callback_v1)(uint32_t event_kind,
                                      uint64_t object_id,
@@ -252,8 +252,8 @@ typedef struct {
 } nb_callbacks_v1_t;
 
 /*
- Borrowed UTF-8 payload view. `data` is only valid for the duration of the
- downcall that produced it; `length == 0` with `data == NULL` is empty.
+ Borrowed UTF-8 payload view. `data` is only valid for the duration of the downcall that produced it;
+ `length == 0` with `data == NULL` is empty.
  */
 typedef struct {
   /*
@@ -316,10 +316,9 @@ typedef uint64_t nb_connection_t;
 /*
  Fixed binary socket address.
 
- `family` is 4 (IPv4) or 6 (IPv6). `port` is in host byte order.
- For IPv4 the first 4 bytes of `address` hold the address and `scope_id`
- is always zero; for IPv6 all 16 bytes hold the address and `scope_id`
- carries the interface scope id.
+ `family` is 4 (IPv4) or 6 (IPv6). `port` is in host byte order. For IPv4 the first 4 bytes of
+ `address` hold the address and `scope_id` is always zero; for IPv6 all 16 bytes hold the address and
+ `scope_id` carries the interface scope id.
  */
 typedef struct {
   /*
@@ -402,8 +401,8 @@ typedef uint64_t nb_server_t;
 /*
  Versioned function table returned by `netbridge_get_api`.
 
- The struct is append-only: new functions are only ever added to the
- trailing reserved area across minor revisions.
+ The struct is append-only: new functions are only ever added to the trailing reserved area across
+ minor revisions.
  */
 typedef struct {
   /*
