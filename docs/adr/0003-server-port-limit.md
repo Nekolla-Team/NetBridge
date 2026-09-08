@@ -1,44 +1,53 @@
-# ADR-0003: 服务端端口语义与连接上限
+# ADR-0003: Server Port Semantics and Connection Limits
 
-状态：已接受 · 日期：2026-08-25
+Status: Accepted · Date: 2026-08-25
 
-## 背景
+## Context
 
-服务端 `[quic]` / `[kcp]` 配置段字段一致：`enable` / `bind` / `host` / `port` / `max_connection`
-（nightconfig TOML）。端口与容量需要无歧义语义；UDP 服务还须防反射滥用。
+The server `[quic]` / `[kcp]` configuration sections use the same fields: `enable` / `bind` /
+`host` / `port` / `max_connection`
+(nightconfig TOML). Port and capacity semantics must be unambiguous, and UDP services must also
+defend against reflection abuse.
 
-## 决策
+## Decision
 
 ### enable
 
-- quic 默认 `true`；kcp 默认 `false`（按需启用）。
+- quic defaults to `true`; kcp defaults to `false` and is enabled on demand.
 
 ### port
 
-- `-1`（默认）：跟随服务器端口。**例外：kcp 跟随 MC 端口 +1**（避免与可能的同端口 UDP 业务相撞）。
-- `0`：系统随机分配，实际端口启动后日志输出。
-- 其他值：必须在 1..=65535。
-- **bind 失败（端口被占等）与越界同路径**：记错误日志、禁用该传输，不影响另一传输与 TCP 主服务。
-- **下发规则**：`-1`/`0` 仅为绑定便利；ping 条目恒写入解析后的实际监听端口（ADR-0001，
-  wire 上不出现 -1/0）。
+- `-1` (default): follow the server port. **Exception: kcp follows the MC port +1** to avoid
+  colliding with possible UDP use on the same port.
+- `0`: let the system allocate a random port; log the actual port after startup.
+- Other values must be in 1..=65535.
+- **Bind failures (for example, an occupied port) follow the same path as out-of-range values**: log
+  an error and disable that transport without affecting the other transport or the main TCP server.
+- **Announcement rule**: `-1`/`0` are binding conveniences only; the ping entry always contains the
+  resolved actual listening port (ADR-0001, so -1/0 never appears on the wire).
 
-### max_connection（默认 256）
+### max_connection (default 256)
 
-- 活跃连接数达上限后，**新客户端静默丢弃**：不发拒绝响应、不回错误帧。
-- 动机：UDP 反射/放大防护——任何可预期回复都会被伪造成本反射源利用。
-- quic 与 kcp 上限**各自独立计数**（各段各配）。
+- Once the active connection limit is reached, **new clients are silently dropped**: no rejection
+  response and no error frame is sent.
+- Rationale: UDP reflection/amplification defense — any predictable response can be abused as a
+  reflection source with spoofed addresses.
+- quic and kcp limits are **counted independently** for their respective sections.
 
 ### bind / host
 
-- `bind`：监听接口 IP 字面量，默认 `0.0.0.0`。
-- `host`：下发进 ping 的地址，null/缺省 = 跟随服务器地址。
+- `bind`: literal listener interface IP, default `0.0.0.0`.
+- `host`: address advertised in ping; null/missing means follow the server address.
 
-### 迁移
+### Migration
 
-- 无旧配置迁移（Alpha 硬切）；无法解析的段按字段默认值处理并记日志。
+- No migration from old configuration is provided (Alpha hard cutover); fields that cannot be parsed
+  fall back individually to defaults and are logged.
 
-## 后果
+## Consequences
 
-- 被丢弃的客户端表现为握手超时 → 走既有 TCP 降级路径，无需专用错误 UI。
-- 现实现用全局 `ACTIVE_SERVER_CONNS` 计数器横跨全部 server 实例；重构须改为
-  **每 server 实例独立计数**（quic/kcp 各自上限的前提）。
+- Dropped clients observe a handshake timeout and follow the existing TCP fallback path; no
+  dedicated error UI is needed.
+- The current implementation uses a global `ACTIVE_SERVER_CONNS` counter across all server
+  instances; the refactor must change this to **per-server-instance counters**, which is required
+  for independent quic/kcp limits.

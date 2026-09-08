@@ -3,14 +3,16 @@ package top.tangge233.netbridge.ability;
 import org.jspecify.annotations.Nullable;
 
 /**
- * status 包解码时捕获的 networks 能力的线程级暂存槽。
+ * Thread-local staging slot for the networks capability captured while decoding a status packet.
  *
- * <p>ClientboundStatusResponsePacket 是 record，无法通过 mixin 挂载实例字段
- * （解码构造器中 readJsonWithCodec 发生在 this() 之前，handler 必须为 static）。
- * 因此解码时写入本槽（按解码线程隔离），包对象创建后由消费方在同一线程取走。
+ * <p>ClientboundStatusResponsePacket is a record, so a mixin cannot attach an instance field. In
+ * the decoding constructor, readJsonWithCodec runs before this(), which also requires the handler
+ * to be static. The decoder therefore stores the value here, isolated by decode thread, and the
+ * consumer takes it on the same thread after the packet object has been created.
  *
- * <p>用 ThreadLocal 而非 ConcurrentHashMap&lt;Thread,…&gt;：同线程写入读取无需并发
- * map，且线程死亡后条目随之释放（CHM 强引用 key 会残留死线程条目）。
+ * <p>A ThreadLocal is used instead of ConcurrentHashMap&lt;Thread,...&gt; because reads and writes
+ * on the same thread need no concurrent map, and the entry disappears with the thread. A CHM would
+ * keep dead Thread keys strongly referenced.
  */
 public final class StatusNetworksCapture {
 
@@ -20,7 +22,10 @@ public final class StatusNetworksCapture {
     }
 
     /**
-     * 解码线程上记录本次解析出的 networks。必须无条件写入（含 empty）： 槽位以「最近一次解码」为准，若空结果跳过写入，上一条残留值会被 误配到后续不宣告加速传输的服务器包上。
+     * Records the networks value parsed by the current decode thread. The slot must always be
+     * written, including an empty value: it represents the most recent decode. Skipping an empty
+     * result would let a stale value from the previous packet be incorrectly associated with a
+     * later server packet that advertises no accelerated transport.
      */
     public static void capture(@Nullable NetworksAbility networks) {
         LAST.set(
@@ -30,7 +35,10 @@ public final class StatusNetworksCapture {
         );
     }
 
-    /** 消费方在包处理时取走当前线程的暂存值并清槽；无则 empty。 */
+    /**
+     * Takes and clears the current thread's staged value while handling the packet; returns empty
+     * if none exists.
+     */
     public static NetworksAbility take() {
         var n = LAST.get();
         LAST.remove();

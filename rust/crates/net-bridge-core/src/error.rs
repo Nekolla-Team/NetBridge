@@ -1,10 +1,10 @@
-//! 桥接层错误类型（thiserror 封装）。
+//! Bridge-layer error types wrapped with thiserror.
 
 use std::io;
 
 use thiserror::Error;
 
-/// 传输类型标识（错误信息用）。
+/// Transport type identifier used in error messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     Quic,
@@ -20,13 +20,13 @@ impl std::fmt::Display for Transport {
     }
 }
 
-/// 桥接层统一错误。
+/// Unified bridge-layer error type.
 #[derive(Debug, Error)]
 pub enum BridgeError {
     #[error("tokio runtime unavailable")]
     RuntimeUnavailable,
 
-    /// 端口绑定失败。双栈回退后仍失败时，`source` 信息含 v6/v4 双原因。
+    /// Port bind failed. If dual-stack fallback also fails, `source` contains both v6 and v4 causes.
     #[error("{transport} bind udp/{port}: {source}")]
     Bind {
         transport: Transport,
@@ -34,7 +34,7 @@ pub enum BridgeError {
         source: io::Error,
     },
 
-    /// 分阶段建立失败（listener 构造、from_std、local_addr 等）。
+    /// Staged setup failure such as listener construction, from_std, or local_addr.
     #[error("{transport} {stage}: {source}")]
     Setup {
         transport: Transport,
@@ -42,7 +42,7 @@ pub enum BridgeError {
         source: io::Error,
     },
 
-    /// 客户端 DNS 解析失败。
+    /// Client DNS resolution failed.
     #[error("dns resolve failed: {host}:{port}: {source}")]
     Dns {
         host: String,
@@ -50,8 +50,9 @@ pub enum BridgeError {
         source: io::Error,
     },
 
-    /// 连接建立失败（握手/对端不可达等）。source 装箱以兼容各传输
-    /// 库的错误类型（quinn ConnectError 等无 io::Error 转换）。
+    /// Connection establishment failed, such as handshake failure or unreachable peer. The source is
+    /// boxed to support error types from different transport libraries, including types such as quinn
+    /// ConnectError that do not convert to io::Error.
     #[error("{transport} connect to {addr}: {source}")]
     Connect {
         transport: Transport,
@@ -59,46 +60,46 @@ pub enum BridgeError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// 连接不存在或已关闭。
+    /// Connection does not exist or is already closed.
     #[error("no such connection")]
     NoSuchConnection,
 
-    /// 连接已关闭，写入被拒绝。
+    /// Connection is closed, so the write is rejected.
     #[error("connection closed")]
     ConnectionClosed,
 
-    /// 操作/启动超时（如 KCP listener 启动窗口）。
+    /// Operation/startup timeout, such as the KCP listener startup window.
     #[error("operation timed out")]
     Timeout,
 
-    /// 协议/流/smux/fec 数据面建立或传输错误。
+    /// Protocol/stream/smux/FEC data-plane setup or transport error.
     #[error("protocol error: {0}")]
     Protocol(String),
 
-    /// 连接建立在完成前被取消。
+    /// Connection establishment was cancelled before completion.
     #[error("connection cancelled")]
     Cancelled,
 
-    /// 内部错误或 panic。
+    /// Internal error or panic.
     #[error("internal error: {0}")]
     Internal(String),
 
-    /// id 分配器即将回绕：context 必须失败，禁止复用 0。
+    /// The ID allocator is about to wrap; the context must fail and must never reuse 0.
     #[error("object id space exhausted")]
     IdOverflow,
 
-    /// 参数非法。
+    /// Invalid argument.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
 }
 
 impl BridgeError {
-    /// 日志边界的字符串形态。
+    /// String form used at logging boundaries.
     pub fn message(&self) -> String {
         self.to_string()
     }
 
-    /// 转换为 ABI CONNECTION_STATE FAILED 的原因码。
+    /// Converts to the reason code for ABI CONNECTION_STATE FAILED.
     pub fn reason_code(&self) -> i64 {
         match self {
             Self::Dns { .. } => 1,

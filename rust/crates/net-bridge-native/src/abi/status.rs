@@ -1,4 +1,4 @@
-//! C ABI 状态码常量与错误映射。
+//! C ABI status-code constants and error mapping.
 
 use net_bridge_core::error::BridgeError;
 

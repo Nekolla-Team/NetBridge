@@ -279,7 +279,7 @@ class NetworksAbilityTest {
 
     @Test
     void unicodeHostRoundTrips() {
-        var host = "mc-例子.测试";
+        var host = "mc-example\u0301.test";
         var ability = StatusNetworksCodec.parse(networksQuic(
                 "{\"enable\":true,\"host\":\"%s\",\"port\":25565,\"protocol\":\"%s\"}".formatted(
                         host,

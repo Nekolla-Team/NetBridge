@@ -1,4 +1,4 @@
-//! QUIC 门面集成测试：真实 QUIC 往返、关闭传播与 quinn 原生回环。
+//! QUIC facade integration tests: real QUIC round trips, close propagation, and native quinn loopback.
 
 use bytes::Bytes;
 use std::time::{Duration, Instant};
@@ -141,9 +141,9 @@ async fn quic_server_stop_does_not_kill_adopted_connections() {
     wait_state(&ctx, server_conn, STATE_CONNECTED);
 
     // Stop server
-    assert!(ctx.stop_server(server).is_ok(), "stop server 必须成功");
+    assert!(ctx.stop_server(server).is_ok(), "stop server must succeed");
 
-    // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
+    // Established connections already owned by Java must remain alive and support normal I/O
     let payload = b"data after server stopped";
     assert_eq!(
         ctx.write_chunk(client, Bytes::copy_from_slice(payload))
@@ -160,7 +160,7 @@ async fn quic_server_stop_does_not_kill_adopted_connections() {
     );
     assert_eq!(wait_read(&ctx, client, reply.len()), reply);
 
-    // 清理连接
+    // Clean up the connection
     ctx.close_connection(client);
     ctx.close_connection(server_conn);
 }
@@ -200,7 +200,7 @@ async fn quic_accepted_guarantees_stream_readiness_and_no_accepted_on_stream_fai
         .collect();
     assert!(
         accepted_events.is_empty(),
-        "在建立双向 stream 之前，服务端绝不能发送 ACCEPTED 事件！"
+        "The server must never emit ACCEPTED before the bidirectional stream is established!"
     );
 
     // Now client opens a bidi stream and sends a small message (probe + trigger)

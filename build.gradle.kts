@@ -67,6 +67,21 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
     inputs.dir(nativeDir).optional(true)
     outputs.files(nativeDir.map { dir -> dir.asFileTree.matching { include("**/manifest.json") } })
 
+    onlyIf {
+        val dir = nativeDir.get().asFile
+        dir.listFiles { file: File -> file.isDirectory }
+                ?.any { platform ->
+                    platform.listFiles { file: File ->
+                        file.isFile &&
+                                (
+                                        file.name.startsWith("libnet_bridge_native") ||
+                                                file.name == "net_bridge_native.dll"
+                                        )
+                    }?.isNotEmpty() == true
+                }
+            ?: false
+    }
+
     doLast {
         val dir = nativeDir.get().asFile
         val header = rootDir
@@ -579,11 +594,11 @@ tasks.register<Copy>("assembleAll") {
     dependsOn(verifyArchitecture)
 
     from(fabricJarConfig) {
-        rename { "net-bridge-fabric-${project.version}.jar" }
+        rename { "net-bridge-fabric-${project.version}+${libs.versions.minecraft.get()}.jar" }
     }
 
     from(neoforgeJarConfig) {
-        rename { "net-bridge-neoforge-${project.version}.jar" }
+        rename { "net-bridge-neoforge-${project.version}+${libs.versions.minecraft.get()}.jar" }
     }
 
     into(layout.buildDirectory.dir("libs"))

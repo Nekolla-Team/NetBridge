@@ -1,55 +1,60 @@
 # Troubleshooting
 
-按启动顺序排列的 net-bridge 诊断手册。日志通道：启动器把 stderr 重定向进
-`logs/latest.log`，native 层错误均带 `[net-bridge-native]` 前缀。
+A net-bridge diagnostic guide ordered by startup sequence. The launcher redirects stderr to
+`logs/latest.log`, and native-layer errors use the `[net-bridge-native]` prefix.
 
-## Native backend 未就绪（加速传输全部禁用）
+## Native Backend Not Ready (All Accelerated Transports Disabled)
 
-日志特征：`net-bridge native unavailable; accelerated transports disabled (TCP fallback)`。
+Typical log: `net-bridge native unavailable; accelerated transports disabled (TCP fallback)`.
 
-| 原因                     | 诊断与处置                                                                                                                                    |
-|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| 不支持的平台/架构        | `native/<os>-<arch>/` 目录无匹配资源。确认平台在支持列表（linux/windows x86_64、linux/macos aarch64、macos x86_64）；arm64 Windows 暂不支持。 |
-| native resource missing  | jar 内缺 `native/<platform>/<lib>`——重装/重新下载完整 mod jar。                                                                               |
-| checksum mismatch        | `manifest.json` 的 sha256 与实际库不一致（jar 损坏或被改动）。重新下载。                                                                      |
-| native access denied     | 未加 JVM 参数 `--enable-native-access=ALL-UNNAMED`（Java 25 下被拒绝访问的 restricted method 会直接失败）。按 README 的启动参数补齐。         |
-| load failed              | 库文件存在但 OS 拒绝映射（权限/缺依赖）。检查文件权限与系统库。                                                                               |
-| missing bootstrap symbol | 库内无 `netbridge_get_api`——版本错配或文件损坏，重装。                                                                                        |
-| ABI incompatible         | `netbridge_get_api` 版本协商失败：mod jar 与 native 库不是同一次构建产物，整体更新。                                                          |
-| API table invalid        | 函数表 struct_size/必需函数指针校验失败——同样按 ABI 不兼容处理。                                                                              |
-| context create failed    | Rust `NativeContext`/tokio runtime 创建失败（资源极端受限）。检查内存/线程数限制。                                                            |
+| Cause                             | Diagnosis and action                                                                                                                                                                            |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Unsupported platform/architecture | No matching resource exists under `native/<os>-<arch>/`. Confirm the platform is supported (linux/windows x86_64, linux/macos aarch64, macos x86_64). arm64 Windows is not currently supported. |
+| native resource missing           | The jar is missing `native/<platform>/<lib>`. Reinstall or redownload the complete mod jar.                                                                                                     |
+| checksum mismatch                 | The sha256 in `manifest.json` does not match the actual library, indicating a corrupted or modified jar. Redownload it.                                                                         |
+| native access denied              | JVM argument `--enable-native-access=ALL-UNNAMED` is missing. On Java 25, denied access to a restricted method fails immediately. Add the startup argument from the README.                     |
+| load failed                       | The library exists but the OS refuses to map it due to permissions or missing dependencies. Check file permissions and system libraries.                                                        |
+| missing bootstrap symbol          | The library does not contain `netbridge_get_api`, indicating a version mismatch or corrupted file. Reinstall.                                                                                   |
+| ABI incompatible                  | `netbridge_get_api` version negotiation failed: the mod jar and native library are not from the same build. Update them together.                                                               |
+| API table invalid                 | Function-table `struct_size` or required function-pointer validation failed. Treat this as ABI incompatibility.                                                                                 |
+| context create failed             | Rust `NativeContext`/Tokio runtime creation failed, typically under extreme resource constraints. Check memory and thread limits.                                                               |
 
-## 服务端启动
+## Server Startup
 
-| 现象                                                        | 诊断与处置                                                                                                                                                    |
-|-------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `quic/kcp transport failed to bind udp/<port>`              | 端口被占用或 bind 地址不合法。`server.toml` 的 `port = 0` 可改随机；`-1` 跟随 MC TCP 端口（kcp 为 +1）。bind 失败只禁用该传输，TCP 不受影响。                 |
-| `No accelerated transport started; only TCP will be served` | 两个传输都未启动（都禁用/都 bind 失败/native 不可用）。核对 `[quic]`/`[kcp]` 的 `enable` 与上游错误。                                                         |
-| ping 无 `networks` 字段                                     | 服务端 acceptor 未运行（dedicated server 才启动；integrated/LAN 不启动 acceptor），或注入超出 256KiB status 上限被放弃（日志 `networks injection dropped`）。 |
+| Symptom                                                     | Diagnosis and action                                                                                                                                                                                                      |
+|-------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `quic/kcp transport failed to bind udp/<port>`              | The port is occupied or the bind address is invalid. In `server.toml`, use `port = 0` for a random port; `-1` follows the MC TCP port (KCP uses +1). A bind failure disables only that transport; TCP is unaffected.      |
+| `No accelerated transport started; only TCP will be served` | Neither transport started because both are disabled, both failed to bind, or native is unavailable. Check `[quic]`/`[kcp]` `enable` and earlier errors.                                                                   |
+| Ping response has no `networks` field                       | The server acceptor is not running (it starts only on a dedicated server; integrated/LAN does not start the acceptor), or injection exceeded the 256KiB status limit and was dropped (log: `networks injection dropped`). |
 
-## 客户端连接
+## Client Connections
 
-| 现象                                    | 诊断与处置                                                                                                                              |
-|-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| 直接连 TCP（无加速尝试）                | F3/日志显示 `Transport for <addr>: TCP (mode=tcp)`：客户端 mode 为 tcp；或目标服务器未宣告所选传输/协议版本不支持。                     |
-| `Handshake to ... failed (attempt 1/2)` | 加速握手失败（黑洞/丢包/版本不匹配）。第 2 次失败自动回退 TCP；确认服务端端口可达（UDP）且两端 mod 版本一致。                           |
-| 频繁回退 TCP                            | 排查 UDP 链路质量（QUIC/KCP 均走 UDP）；KCP 可试 `profile = "aggressive"`（高丢包链路）。成功过的端点会缓存 5 分钟以跳过协商。          |
-| 服务端已宣告但客户端仍走 TCP            | 远端 `networks` JSON 畸形/超长会被客户端 codec 安全降级为空能力（不崩溃、不误报）；核对服务端是否把网络块截断或漏发 `protocol` 版本串。 |
-| 连接成功但无 F3 协议行                  | F3 行仅在 net-bridge 加速连接激活时显示；TCP 直连无该行（正常）。                                                                       |
+| Symptom                                                 | Diagnosis and action                                                                                                                                                                                                                       |
+|---------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Connects directly with TCP (no accelerated attempt)     | F3/logs show `Transport for <addr>: TCP (mode=tcp)`: client mode is tcp, or the target server did not announce the selected transport / uses an unsupported protocol version.                                                              |
+| `Handshake to ... failed (attempt 1/2)`                 | Accelerated handshake failed due to a black hole, packet loss, or version mismatch. After the second failure it automatically falls back to TCP. Confirm the server UDP port is reachable and both endpoints use compatible mod versions.  |
+| Frequent TCP fallback                                   | Investigate UDP path quality because both QUIC and KCP use UDP. For KCP, try `profile = "aggressive"` on lossy paths. Successful endpoints are cached for 5 minutes to skip negotiation.                                                   |
+| Server announces acceleration but client still uses TCP | Malformed or oversized remote `networks` JSON safely degrades to empty capability in the client codec without crashing or false positives. Check whether the server truncated the networks block or omitted the `protocol` version string. |
+| Connected successfully but no F3 protocol line          | The F3 line is shown only while a net-bridge accelerated connection is active. Direct TCP has no line, which is expected.                                                                                                                  |
 
-## 开发者
+## Developers
 
-- 缓存目录损坏/权限：`NativeResourceException`（错误码 `CACHE_UNWRITABLE`）；可用
-  `-Dnetbridge.native.cache.dir=<dir>` 重定向缓存根。损坏条目自动复验并原子替换。
-- 平台不支持：错误码 `UNSUPPORTED_PLATFORM`（附 normalized os/arch）。
-- 本地调试 native：`-Dnetbridge.native.path=/abs/path/libnet_bridge_native.so`
-  （优先于打包资源；生产无 `java.library.path` 回退）。
-- 系统属性（transport/quicPort/native.path/cache.dir）仅由 `NetBridgeProperties` 集中解析并经
-  组合根注入，新增属性不得在业务代码里散读 `System.getProperty`。
-- 构建验证：`./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest`。
-- 打包验证：`./gradlew fabric:verifyFabricPackaging neoforge:verifyNeoForgePackaging`
-  （断言 jackson-core 恰一份、零 databind、nightconfig 存在、native manifest+库齐全、 META-INF
-  无签名残留）；若报重复 `tools.jackson.*` 或 `META-INF` 冲突，说明某处 embed 了 二次打包/整目录排除被移除。
-- native 集成测试：`./gradlew :common:nativeIntegrationTest`（自带
-  `--enable-native-access=ALL-UNNAMED` 与 `--illegal-native-access=deny`）。
-- 基准测试：`./gradlew :common:ffmBenchmark`，说明见 `docs/benchmarks/ffm-baseline.md`。
+- Cache-directory corruption/permissions: `NativeResourceException` with error code
+  `CACHE_UNWRITABLE`. Use
+  `-Dnetbridge.native.cache.dir=<dir>` to redirect the cache root. Corrupt entries are revalidated
+  and atomically replaced.
+- Unsupported platform: error code `UNSUPPORTED_PLATFORM`, including normalized os/arch.
+- Local native debugging: `-Dnetbridge.native.path=/abs/path/libnet_bridge_native.so`
+  takes precedence over packaged resources; production has no `java.library.path` fallback.
+- System properties (transport/quicPort/native.path/cache.dir) are parsed centrally by
+  `NetBridgeProperties` and injected through the composition root. New properties must not be read
+  ad hoc with `System.getProperty` in business code.
+- Build verification: `./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest`.
+- Packaging verification: `./gradlew fabric:verifyFabricPackaging neoforge:verifyNeoForgePackaging`
+  asserts exactly one jackson-core, zero databind, nightconfig presence, complete native
+  manifest+libraries, and no leftover signatures in META-INF. Duplicate `tools.jackson.*` or
+  `META-INF` conflicts indicate that a dependency was embedded twice or a whole-directory exclusion
+  was removed.
+- Native integration tests: `./gradlew :common:nativeIntegrationTest`, which includes
+  `--enable-native-access=ALL-UNNAMED` and `--illegal-native-access=deny`.
+- Benchmark: `./gradlew :common:ffmBenchmark`; see `docs/benchmarks/ffm-baseline.md`.

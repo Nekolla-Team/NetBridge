@@ -1,4 +1,4 @@
-//! NativeContext：实例级运行时所有权根节点。
+//! NativeContext: root of instance-level runtime ownership.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -19,8 +19,8 @@ use crate::{
     TransportEndpoint,
 };
 
-/// 生产 KCP listener 启动窗口。
-pub const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Production KCP listener startup window.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const CONTEXT_STATE_RUNNING: u8 = 0;
 pub const CONTEXT_STATE_SHUTTING_DOWN: u8 = 1;
@@ -39,7 +39,7 @@ pub struct NativeContext {
 }
 
 impl NativeContext {
-    /// 创建新的 NativeContext 实例。
+    /// Creates a new NativeContext instance.
     pub fn new(
         worker_threads: usize,
         event_sink: Option<Arc<dyn EventSink>>,
@@ -80,7 +80,7 @@ impl NativeContext {
         self.state() == CONTEXT_STATE_RUNNING
     }
 
-    /// 分配永不复用、永不产生的 id；回绕即 context 级 fatal。
+    /// Allocates IDs that are never reused and never zero; wraparound is fatal for the context.
     pub fn allocate_id(&self) -> Result<u64, BridgeError> {
         let mut curr = self.next_id.load(Ordering::SeqCst);
         loop {
@@ -131,8 +131,10 @@ impl NativeContext {
             .and_then(|h| *h.remote_addr.read().unwrap())
     }
 
-    /// 尝试原子提交接受连接：如果服务端已停止或不在运行状态，则原子失败。
-    /// 关键：所有锁与 DashMap guard 释放后才调用 foreign callback（INV-4）。
+    /// Attempts to atomically commit an accepted connection; fails atomically if the server has stopped
+    /// or is not running.
+    ///
+    /// Important: invoke the foreign callback only after releasing all locks and DashMap guards (INV-4).
     pub(crate) fn try_commit_accept(
         &self,
         server_id: u64,
@@ -143,12 +145,9 @@ impl NativeContext {
             Some(s) => s,
             None => return false,
         };
-        // DashMap guard 已释放
+        // DashMap guard has been released
         let committed = {
-            let _guard = match server.commit_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let _guard = server.commit_lock.lock().unwrap_or_else(|p| p.into_inner());
             if !server.is_running() {
                 false
             } else {
@@ -156,7 +155,7 @@ impl NativeContext {
                 true
             }
         };
-        // commit_lock 已释放
+        // commit_lock has been released
         if committed {
             self.event_sink().on_event(
                 crate::event::NB_EVENT_ACCEPTED,
@@ -170,8 +169,9 @@ impl NativeContext {
         }
     }
 
-    /// 发送连接成功事件（CONNECTED）。
-    /// 关键：DashMap guard 在 callback 前释放（INV-4）。
+    /// Emits a successful-connection event (CONNECTED).
+    ///
+    /// Important: release the DashMap guard before the callback (INV-4).
     pub(crate) fn emit_connected(&self, conn_id: u64) -> bool {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -181,7 +181,7 @@ impl NativeContext {
         }
     }
 
-    /// 发送服务端状态事件（SERVER_STATE）。
+    /// Emits a server-state event (SERVER_STATE).
     pub(crate) fn emit_server_state(&self, server_id: u64, state: u8) {
         self.event_sink().on_event(
             crate::event::NB_EVENT_SERVER_STATE,
@@ -191,13 +191,14 @@ impl NativeContext {
         );
     }
 
-    /// Java 侧 release：发送 Close 并移除注册表条目（连接 wrapper 是 entry 的 owner）。
+    /// Java-side release: send Close and remove the registry entry; the connection wrapper owns the
+    /// entry.
     pub fn close_connection(&self, conn: u64) -> bool {
         let handle = match self.connections.get(&conn).map(|h| Arc::clone(&*h)) {
             Some(h) => h,
             None => return false,
         };
-        // DashMap guard 已在获取 Arc 后立即释放
+        // DashMap guard was released immediately after obtaining the Arc
         let _ = handle.emit_terminal(&*self.event_sink, conn, STATE_CLOSED, 0);
         let to_transport = handle.to_transport.clone();
         let _ = handle.cancel_tx.send(true);
@@ -207,8 +208,10 @@ impl NativeContext {
         true
     }
 
-    /// 发送非终态事件（DATA_AVAILABLE / WRITABLE）。如果终态已标记则静默丢弃。
-    /// 关键：DashMap guard 在 callback 前释放（INV-4）。
+    /// Emits a non-terminal event (DATA_AVAILABLE / WRITABLE). Silently drop it if terminal state has
+    /// already been marked.
+    ///
+    /// Important: release the DashMap guard before the callback (INV-4).
     pub(crate) fn emit_non_terminal(&self, conn_id: u64, kind: u32, arg0: i64, arg1: i64) -> bool {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -218,8 +221,10 @@ impl NativeContext {
         }
     }
 
-    /// 终态事件（FAILED/CLOSED）恰好一次；entry 保留为 tombstone 直到 Java release。
-    /// 关键：DashMap guard 在 callback 前释放（INV-4）。
+    /// Emit the terminal event (FAILED/CLOSED) exactly once; keep the entry as a tombstone until Java
+    /// releases it.
+    ///
+    /// Important: release the DashMap guard before the callback (INV-4).
     pub(crate) fn emit_terminal_with_reason(&self, conn_id: u64, reason_code: i64) {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -232,8 +237,9 @@ impl NativeContext {
         self.emit_terminal_with_reason(conn_id, 0);
     }
 
-    /// 终态落账（tombstone 保留）+ 恰好一次的终态事件。
-    /// 关键：DashMap guard 在 callback 前释放（INV-4）。
+    /// Commit terminal state while retaining the tombstone, plus emit the terminal event exactly once.
+    ///
+    /// Important: release the DashMap guard before the callback (INV-4).
     pub(crate) fn fail_connection_with_reason(&self, conn_id: u64, reason_code: i64) {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -252,16 +258,17 @@ impl NativeContext {
         }
     }
 
-    /// panic-in-poll 防护：真实捕获 future poll 期间的 panic（单层任务，无嵌套 spawn）。
-    /// 注册优先于执行：保证任务在 registry 插入完成后才可退出/移除，杜绝 stale handle 竞态。
-    /// RAII Guard 保证任务无论是正常退出、panic 还是被 abort，均能从 conn_tasks 移除。
+    /// panic-in-poll protection: actually catch panics during future polling with a single-layer task
+    /// and no nested spawn. Register before execution so a task cannot exit/remove itself until registry
+    /// insertion completes, preventing stale-handle races. An RAII guard ensures the task is removed
+    /// from conn_tasks whether it exits normally, panics, or is aborted.
     pub(crate) fn spawn_connection_task<F>(
         self: &Arc<Self>,
         what: &'static str,
         conn_id: u64,
         fut: F,
     ) where
-        F: std::future::Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         let ctx = Arc::clone(self);
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
@@ -293,11 +300,11 @@ impl NativeContext {
         let _ = start_tx.send(());
     }
 
-    /// 服务端任务 panic → 状态置为 FAILED 并发出 SERVER_STATE 事件。
-    /// 单层任务，无嵌套 spawn，注册优先于执行，RAII Guard 保证清理。
+    /// A server-task panic transitions state to FAILED and emits a SERVER_STATE event. Single-layer task
+    /// with no nested spawn; registration precedes execution, and an RAII guard guarantees cleanup.
     pub(crate) fn spawn_server_task<F>(self: &Arc<Self>, what: &'static str, server_id: u64, fut: F)
     where
-        F: std::future::Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         let ctx = Arc::clone(self);
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
@@ -409,10 +416,9 @@ impl NativeContext {
         let inbound_bytes = Arc::clone(&handle.inbound_bytes);
         let read_waker = Arc::clone(&handle.read_waker);
         drop(handle);
-        let mut guard = match to_java.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut guard = to_java
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (rx, pending) = &mut *guard;
 
         let first = match pending.pop_front().or_else(|| rx.try_recv().ok()) {
@@ -475,12 +481,9 @@ impl NativeContext {
             Some(s) => s,
             None => return Err(BridgeError::NoSuchConnection),
         };
-        // DashMap guard 已在获取 Arc 后释放
+        // DashMap guard was released after obtaining the Arc
         let endpoint_stop = {
-            let _guard = match handle.commit_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let _guard = handle.commit_lock.lock().unwrap_or_else(|p| p.into_inner());
             let curr = handle.state.load(Ordering::SeqCst);
             if curr == crate::SERVER_STATE_STOPPED {
                 return Ok(());
@@ -493,7 +496,7 @@ impl NativeContext {
                 TransportEndpoint::Kcp(stop_tx) => TransportEndpoint::Kcp(stop_tx.clone()),
             }
         };
-        // commit_lock 已释放
+        // commit_lock has been released
         match &endpoint_stop {
             TransportEndpoint::Quic(stop_tx) => {
                 let _ = stop_tx.try_send(());
@@ -503,20 +506,16 @@ impl NativeContext {
             }
         }
         let (lock, cvar) = &*handle.stopped_pair;
-        let mut guard = match lock.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
+        let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let start = std::time::Instant::now();
         while !*guard {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
                 return Err(BridgeError::Timeout);
             }
-            let (g, _) = match cvar.wait_timeout(guard, timeout.saturating_sub(elapsed)) {
-                Ok(res) => res,
-                Err(p) => p.into_inner(),
-            };
+            let (g, _) = cvar
+                .wait_timeout(guard, timeout.saturating_sub(elapsed))
+                .unwrap_or_else(|p| p.into_inner());
             guard = g;
         }
 
@@ -589,7 +588,7 @@ impl NativeContext {
 
         let mut shutdown_err: Option<BridgeError> = None;
 
-        // 停止所有服务端
+        // Stop all servers
         let server_ids: Vec<u64> = self.servers.iter().map(|e| *e.key()).collect();
         for s_id in server_ids {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -600,13 +599,13 @@ impl NativeContext {
             }
         }
 
-        // 关闭所有活跃连接
+        // Close all active connections
         let conn_ids: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
         for c_id in conn_ids {
             self.close_connection(c_id);
         }
 
-        // 等待所有连接和任务真正 join 退出
+        // Wait for all connections and tasks to actually join and exit
         while !self.conn_tasks.is_empty() || !self.server_tasks.is_empty() {
             if std::time::Instant::now() >= deadline {
                 if shutdown_err.is_none() {
@@ -627,7 +626,7 @@ impl NativeContext {
             return Err(err);
         }
 
-        // 确保所有注册表清空
+        // Ensure all registries are empty
         let remaining_conns: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
         for c_id in remaining_conns {
             self.remove_conn(c_id);
@@ -635,7 +634,7 @@ impl NativeContext {
         self.conn_tasks.clear();
         self.server_tasks.clear();
 
-        // 关闭 Tokio runtime
+        // Shut down the Tokio runtime
         if let Ok(mut guard) = self.runtime.lock()
             && let Some(rt) = guard.take()
         {
@@ -680,7 +679,7 @@ mod tests {
         }
     }
 
-    struct RecordingSink(std::sync::Mutex<Vec<(u32, u64, i64, i64)>>);
+    struct RecordingSink(Mutex<Vec<(u32, u64, i64, i64)>>);
 
     impl EventSink for RecordingSink {
         fn on_event(&self, kind: u32, object_id: u64, arg0: i64, arg1: i64) {
@@ -689,7 +688,7 @@ mod tests {
     }
 
     fn recording_ctx() -> (Arc<NativeContext>, Arc<RecordingSink>) {
-        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
         let ctx = NativeContext::new(2, Some(sink.clone())).expect("context");
         (ctx, sink)
     }
@@ -731,9 +730,9 @@ mod tests {
             .connect(TransportKind::Quic, "127.0.0.1", port, KcpProfile::Balanced)
             .expect("connect in ctx");
 
-        // 等待连接建立并关停
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
+        // Wait for connection establishment and shutdown
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if ctx.connection_state(client) == Some(STATE_CONNECTED) {
                 break;
             }
@@ -758,8 +757,8 @@ mod tests {
             let client = ctx
                 .connect(TransportKind::Quic, "127.0.0.1", port, KcpProfile::Balanced)
                 .expect("connect");
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
                 if ctx.connection_state(client) == Some(STATE_CONNECTED) {
                     break;
                 }
@@ -779,9 +778,9 @@ mod tests {
                     .expect("write"),
                 payload.len()
             );
-            let read_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let read_deadline = Instant::now() + Duration::from_secs(5);
             let mut got = 0usize;
-            while got < payload.len() && std::time::Instant::now() < read_deadline {
+            while got < payload.len() && Instant::now() < read_deadline {
                 match ctx.read_chunk(server_conn, 65536) {
                     Ok(data) if !data.is_empty() => got += data.len(),
                     _ => std::thread::sleep(Duration::from_millis(10)),
@@ -823,7 +822,7 @@ mod tests {
         ctx.next_id.store(u64::MAX - start_offset, Ordering::SeqCst);
         let num_threads = 8;
         let iters_per_thread = 50;
-        let allocated_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let allocated_ids = Arc::new(Mutex::new(Vec::new()));
         let mut handles = Vec::new();
         for _ in 0..num_threads {
             let ctx = Arc::clone(&ctx);
@@ -831,7 +830,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 for _ in 0..iters_per_thread {
                     if let Ok(id) = ctx.allocate_id() {
-                        assert_ne!(id, 0, "ID 0 绝不能被分配");
+                        assert_ne!(id, 0, "ID 0 must never be allocated");
                         allocated_ids.lock().unwrap().push(id);
                     }
                 }
@@ -843,11 +842,15 @@ mod tests {
         let ids = allocated_ids.lock().unwrap().clone();
         assert_eq!(ids.len(), (start_offset + 1) as usize);
         let unique_set: std::collections::HashSet<u64> = ids.iter().copied().collect();
-        assert_eq!(unique_set.len(), ids.len(), "所有分配的 ID 必须全局唯一");
+        assert_eq!(
+            unique_set.len(),
+            ids.len(),
+            "All allocated IDs must be globally unique"
+        );
         for expected in (u64::MAX - start_offset)..=u64::MAX {
             assert!(
                 unique_set.contains(&expected),
-                "必须成功分配范围内的所有 ID"
+                "All IDs in the requested range must be allocated successfully"
             );
         }
         for _ in 0..100 {
@@ -896,14 +899,24 @@ mod tests {
             {
                 break;
             }
-            assert!(Instant::now() < deadline, "panic 未产生终态事件");
+            assert!(
+                Instant::now() < deadline,
+                "Panic did not produce a terminal event"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(ctx.connection_state(7), Some(STATE_FAILED));
-        assert!(ctx.conns().contains_key(&7), "tombstone 保留待 release");
+        assert!(
+            ctx.conns().contains_key(&7),
+            "Tombstone must remain until release"
+        );
         let events = sink.0.lock().unwrap().len();
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(sink.0.lock().unwrap().len(), events, "终态事件必须恰好一次");
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            events,
+            "Terminal event must occur exactly once"
+        );
         ctx.close_connection(7);
         assert_eq!(ctx.connection_state(7), None);
     }
@@ -929,8 +942,10 @@ mod tests {
             )),
         );
 
-        let chunk = Bytes::copy_from_slice(&vec![0xAAu8; crate::MAX_IO_CHUNK]); // 64 KiB
-        let total_chunks = crate::DEFAULT_MAX_BUFFERED_BYTES / crate::MAX_IO_CHUNK; // 64 chunks = 4 MiB
+        // 64 KiB
+        let chunk = Bytes::copy_from_slice(&vec![0xAAu8; crate::MAX_IO_CHUNK]);
+        // 64 chunks = 4 MiB
+        let total_chunks = crate::DEFAULT_MAX_BUFFERED_BYTES / crate::MAX_IO_CHUNK;
 
         for i in 0..total_chunks {
             let res = ctx.write_chunk(42, chunk.clone()).expect("write ok");
@@ -990,11 +1005,11 @@ mod tests {
             KcpProfile::Balanced,
             Duration::ZERO,
         );
-        assert!(result.is_err(), "ZERO 超时必须失败");
+        assert!(result.is_err(), "ZERO timeout must fail");
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             ctx.servers_map().is_empty(),
-            "启动超时不得留下 orphan server: {:?}",
+            "Startup timeout must not leave an orphan server: {:?}",
             ctx.servers_map()
                 .iter()
                 .map(|e| *e.key())
@@ -1018,7 +1033,7 @@ mod tests {
         }
         let remote = ctx
             .connection_remote_addr(client)
-            .expect("client remote addr 必须在握手成功后记录");
+            .expect("Client remote address must be recorded after a successful handshake");
         assert!(remote.port() > 0);
     }
 
@@ -1081,11 +1096,9 @@ mod tests {
         let (stop_tx, _) = tokio::sync::mpsc::channel(1);
         let server_id = 100;
         let conn_count = Arc::new(AtomicUsize::new(1));
-        let state = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::SERVER_STATE_RUNNING,
-        ));
-        let commit_lock = Arc::new(std::sync::Mutex::new(()));
-        let stopped_pair = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
+        let state = Arc::new(AtomicU8::new(crate::SERVER_STATE_RUNNING));
+        let commit_lock = Arc::new(Mutex::new(()));
+        let stopped_pair = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
 
         ctx.servers_map().insert(
             server_id,
@@ -1227,7 +1240,8 @@ mod tests {
                 && !self.reentered.swap(true, Ordering::SeqCst)
                 && let Some(ctx) = self.ctx.read().unwrap().as_ref()
             {
-                // 同步重入调用 close_connection 以及查询状态，验证绝无死锁
+                // Synchronously reenter close_connection and query state to verify there is no
+                // deadlock
                 assert!(ctx.close_connection(object_id));
                 let _ = ctx.connection_state(object_id);
             }
@@ -1259,13 +1273,16 @@ mod tests {
         );
         ctx.conns().insert(conn_id, Arc::new(handle));
 
-        // 触发 CONNECTED 事件，sink 同步重入 close_connection
+        // Trigger CONNECTED; the sink synchronously reenters close_connection
         assert!(ctx.emit_connected(conn_id));
         assert!(
             sink.reentered.load(Ordering::SeqCst),
-            "Sink 必须被调用并重入"
+            "Sink must be invoked and reenter"
         );
-        assert!(!ctx.conns().contains_key(&conn_id), "连接必须被成功移除");
+        assert!(
+            !ctx.conns().contains_key(&conn_id),
+            "Connection must be removed successfully"
+        );
     }
 
     struct ReentrantServerSink {
@@ -1279,7 +1296,8 @@ mod tests {
                 && !self.stopped_in_callback.swap(true, Ordering::SeqCst)
                 && let Some(ctx) = self.ctx.read().unwrap().as_ref()
             {
-                // 收到 ACCEPTED 时同步调用 stop_server，验证绝无死锁（INV-4, P0-RUST-01, P0-RUST-02）
+                // Synchronously call stop_server on ACCEPTED to verify there is no deadlock
+                // (INV-4, P0-RUST-01, P0-RUST-02)
                 assert!(ctx.stop_server(object_id).is_ok());
             }
         }
@@ -1296,11 +1314,9 @@ mod tests {
 
         let server_id = 500;
         let conn_count = Arc::new(AtomicUsize::new(0));
-        let state = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::SERVER_STATE_RUNNING,
-        ));
-        let commit_lock = Arc::new(std::sync::Mutex::new(()));
-        let stopped_pair = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
+        let state = Arc::new(AtomicU8::new(crate::SERVER_STATE_RUNNING));
+        let commit_lock = Arc::new(Mutex::new(()));
+        let stopped_pair = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
         let (stop_tx, _) = tokio::sync::mpsc::channel(1);
 
         ctx.servers_map().insert(
@@ -1331,14 +1347,14 @@ mod tests {
         );
 
         let accepted = ctx.try_commit_accept(server_id, 1001, Arc::new(handle));
-        assert!(accepted, "Commit accept 必须成功");
+        assert!(accepted, "Commit accept must succeed");
         assert!(
             sink.stopped_in_callback.load(Ordering::SeqCst),
-            "必须在 callback 中重入 stop_server"
+            "stop_server must be reentered from the callback"
         );
         assert!(
             !ctx.servers_map().contains_key(&server_id),
-            "Server 必须被 stop 并移出注册表"
+            "Server must be stopped and removed from the registry"
         );
     }
 }

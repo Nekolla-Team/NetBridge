@@ -1,4 +1,4 @@
-//! C 回调适配器：将 net-bridge-core EventSink 转发给 C 函数指针。
+//! C callback adapter forwarding net-bridge-core EventSink events to a C function pointer.
 
 use super::types::NbEventCallbackV1;
 use net_bridge_core::EventSink;

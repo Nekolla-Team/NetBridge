@@ -1,4 +1,4 @@
-//! bridge 面常量测试：ABI 版本与状态码契约。
+//! Bridge-surface constant tests for ABI version and status-code contracts.
 
 use super::STATE_CONNECTED;
 

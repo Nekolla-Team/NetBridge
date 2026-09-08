@@ -3,7 +3,7 @@ package top.tangge233.netbridge.nativebridge;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Native backend 可用性快照。
+ * Snapshot of native backend availability.
  */
 public record NativeBackendAvailability(
         NativeBackendState state,

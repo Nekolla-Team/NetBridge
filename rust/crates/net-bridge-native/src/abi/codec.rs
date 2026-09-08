@@ -1,4 +1,4 @@
-//! C ABI 结构体编解码助手。
+//! C ABI struct encoding/decoding helpers.
 
 use std::net::SocketAddr;
 use std::slice;
@@ -9,11 +9,12 @@ use super::types::{NB_TRANSPORT_KCP, NB_TRANSPORT_QUIC, NbBytesViewV1, NbSocketA
 use net_bridge_core::TransportKind;
 use net_bridge_core::transport::kcp::config::KcpProfile;
 
-/// 将 `NbBytesViewV1` 解码为 UTF-8 字符串切片。
+/// Decodes `NbBytesViewV1` into a UTF-8 string slice.
 ///
 /// # Safety
 ///
-/// 当 `view.length > 0` 时，`view.data` 必须指向至少 `view.length` 字节的有效已初始化内存。
+/// When `view.length > 0`, `view.data` must point to at least `view.length` bytes of valid initialized
+/// memory.
 pub unsafe fn bytes_view_to_str<'a>(view: &NbBytesViewV1) -> Result<&'a str, NbStatus> {
     if view.reserved0 != 0 {
         return Err(NB_INVALID_ARGUMENT);

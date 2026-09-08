@@ -162,7 +162,11 @@ class FakeNativeTransportBackendTest {
             var src = ByteBuffer.wrap(big);
             var first = client.write(src);
             assertEquals(NativeIoResult.WOULD_BLOCK, first);
-            assertEquals(0, src.position(), "WOULD_BLOCK 不得消费输入");
+            assertEquals(
+                    0,
+                    src.position(),
+                    "WOULD_BLOCK must not consume input"
+            );
             assertTrue(fakeClient.writerBlocked());
 
             var writableLatch = new CountDownLatch(1);

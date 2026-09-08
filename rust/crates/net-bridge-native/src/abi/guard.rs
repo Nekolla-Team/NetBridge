@@ -1,4 +1,4 @@
-//! FFI 边界异常安全保护：防止 panic 跨越 extern "C" 边界。
+//! FFI-boundary exception-safety guard preventing panics from crossing the extern "C" boundary.
 
 use super::status::{NB_PANIC, NbStatus};
 use std::panic::{AssertUnwindSafe, catch_unwind};

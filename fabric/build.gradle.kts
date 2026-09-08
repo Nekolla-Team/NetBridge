@@ -76,7 +76,11 @@ val fabricJarConfig = configurations.create("fabricJarConfig") {
     isCanBeResolved = false
 }
 
-val remapJarTask = tasks.named<AbstractArchiveTask>("remapJar")
+val remapJarTask = tasks.named<AbstractArchiveTask>("remapJar") {
+    archiveFileName.set(
+        "net-bridge-fabric-${project.version}+${libs.versions.minecraft.get()}.jar"
+    )
+}
 
 val verifyFabricPackaging = tasks.register<VerifyEmbeddedPackaging>("verifyFabricPackaging") {
     dependsOn(remapJarTask)

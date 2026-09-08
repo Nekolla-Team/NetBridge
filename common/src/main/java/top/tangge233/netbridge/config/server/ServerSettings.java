@@ -1,10 +1,10 @@
 package top.tangge233.netbridge.config.server;
 
 /**
- * 服务端传输配置集合。
+ * Collection of server transport settings.
  *
- * @param quic QUIC 传输配置
- * @param kcp  KCP 传输配置
+ * @param quic QUIC transport settings
+ * @param kcp  KCP transport settings
  */
 public record ServerSettings(
         ServerTransportSettings quic,

@@ -1,36 +1,57 @@
-# ADR-0001: networks 能力发现 wire 格式 v2
+# ADR-0001: networks Capability Discovery Wire Format v2
 
-状态：已接受 · 日期：2026-08-25 · 取代：pre-refactor networks 格式（旧代码注释中的 ADR-0002）
+Status: Accepted · Date: 2026-08-25 · Supersedes: pre-refactor networks format (ADR-0002 in old code
+comments)
 
-## 背景
+## Context
 
-服务端经列表 ping 响应注入顶层 `networks` 对象宣告传输能力。旧格式为
-`quic: {features: ["quic-raw"], port, protocol: "net-bridge/1"}`。KCP 加入后需统一多传输宣告，
-且项目处于 Alpha，允许破坏性变更（硬切，不做双格式兼容期）。
+The server announces transport capabilities by injecting a top-level `networks` object into the
+server-list ping response. The old format was
+`quic: {features: ["quic-raw"], port, protocol: "net-bridge/1"}`. After adding KCP, a unified
+multi-transport announcement is required, and the project is in Alpha, so breaking changes are
+acceptable (hard cutover with no dual-format compatibility period).
 
-## 决策
+## Decision
 
-wire 格式 v2：
+Wire format v2:
 
 ```json
 "networks": {
-  "quic": {"enable": true, "host": "1.1.1.1", "port": 25565, "protocol": "net-bri-quic/1"},
-  "kcp":  {"enable": true, "host": null,     "port": 25566, "protocol": "net-bri-kcp/1"}
+  "quic": {
+    "enable": true,
+    "host": "1.1.1.1",
+    "port": 25565,
+    "protocol": "net-bri-quic/1"
+  },
+  "kcp": {
+    "enable": true,
+    "host": null,
+    "port": 25566,
+    "protocol": "net-bri-kcp/1"
+  }
 }
 ```
 
-- 每传输一个平级条目；字段集相同：`enable` / `host` / `port` / `protocol`。
-- **wire 上只出现解析后的具体值**：服务端 `[quic]/[kcp] port = -1/0` 仅是绑定便利，
-  启动时即解析为实际监听端口再写入条目——wire 的 `port` 恒为 1..=65535，绝不出现 -1/0。
-- `enable` 缺失视为 `false`。
-- `host` 缺失或 null：客户端使用 ping 目标的服务器地址（此时端口仍取条目值；
-  若条目整体缺失则该传输不存在，无回退拼接）。
-- **`features` 字段废除**。未来新传输算法靠新增条目/扩展字段表达，版本演进只看 `protocol`。
-- **协议协商**：客户端将条目 `protocol` 与自身支持集（`net-bri-quic/1`、`net-bri-kcp/1`）精确比对；
-  不支持的协议 → 该传输本地禁用（视同未宣告）。
-- 不做旧格式解析；老客户端连新服务端只会看到无能力，回落 TCP，属预期。
+- Each transport has a peer-level entry with the same field set: `enable` / `host` / `port` /
+  `protocol`.
+- **Only resolved concrete values appear on the wire**: server `[quic]/[kcp] port = -1/0` values are
+  binding conveniences only. They are resolved to the actual listening port at startup before the
+  entry is written, so wire `port` is always 1..=65535 and never -1/0.
+- Missing `enable` is treated as `false`.
+- Missing or null `host`: the client uses the server address from the ping target (the port still
+  comes from the entry; if the entire entry is missing, that transport does not exist and no
+  fallback address is synthesized).
+- The **`features` field is removed**. Future transport algorithms are represented by new entries or
+  extended fields; version evolution is governed only by `protocol`.
+- **Protocol negotiation**: the client compares each entry's `protocol` exactly against its
+  supported set (`net-bri-quic/1`, `net-bri-kcp/1`). An unsupported protocol disables that transport
+  locally, as though it had not been announced.
+- The old format is not parsed. Old clients connecting to new servers will simply see no capability
+  and fall back to TCP, which is expected.
 
-## 后果
+## Consequences
 
-- `NetworksAbility` 重构为按传输名取条目的通用模型，删除 features 逻辑。
-- 协议串即版本门闩：后续不兼容改动升 `net-bri-quic/2` 等。
+- `NetworksAbility` is refactored into a generic model keyed by transport name, and all features
+  logic is removed.
+- The protocol string is the version gate: later incompatible changes increment strings such as
+  `net-bri-quic/2`.

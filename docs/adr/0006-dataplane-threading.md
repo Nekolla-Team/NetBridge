@@ -1,31 +1,38 @@
-# ADR-0006: 数据面线程模型——EventLoop 自适应轮询
+# ADR-0006: Data-Plane Threading Model — Adaptive EventLoop Polling
 
-状态：已被 ADR-0010 取代 · 日期：2026-08-25 · 取代：pre-refactor QuicChannel 固定 5ms 轮询注释中的
-ADR-0001 表述
+Status: Superseded by ADR-0010 · Date: 2026-08-25 · Supersedes: the ADR-0001 wording in pre-refactor
+comments about QuicChannel fixed 5ms polling
 
-## 背景
+## Context
 
-native 侧（tokio）异步产生/消费字节，Java 侧 Netty EventLoop 消费。候选方案调研结论：
+The native side (tokio) asynchronously produces and consumes bytes, while the Java Netty EventLoop
+consumes them. Investigation of candidate approaches concluded:
 
-| 方案                                               | 结论                                                                                                                                                   |
-|----------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Rust→Java 回调（AttachCurrentThread 常驻派发线程） | 拒绝。每次 attach/detach ~50–100μs；常驻附着需自管线程生命周期、DeleteLocalRef、bootstrap classloader 限制、关闭期死锁风险；收益仅为消除 ≤5ms 轮询延迟 |
-| wakeup fd 注册进 NioEventLoop                      | 拒绝。把 native fd 包装为 SelectableChannel 依赖 `sun.nio.ch` 内部 API，跨启动器/JVM 发行版不可移植                                                    |
-| 每连接阻塞读专用线程                               | 拒绝。线程数随连接数线性膨胀，且数据仍需 marshal 回 EventLoop                                                                                          |
-| EventLoop 定时轮询                                 | **采用**。现状每轮 2–3 次 JNI 调用（亚微秒），固定 5ms 已实测可行；仅需自适应化                                                                        |
+| Approach                                                                      | Conclusion                                                                                                                                                                                                                                                                 |
+|-------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Rust→Java callback (permanently attached AttachCurrentThread dispatch thread) | Rejected. Each attach/detach costs roughly 50–100μs; permanent attachment requires custom thread lifecycle management, DeleteLocalRef handling, bootstrap classloader constraints, and shutdown deadlock risk, while the only benefit is eliminating ≤5ms polling latency. |
+| Register a wakeup fd with NioEventLoop                                        | Rejected. Wrapping a native fd as a SelectableChannel depends on internal `sun.nio.ch` APIs and is not portable across launchers/JVM distributions.                                                                                                                        |
+| One dedicated blocking-read thread per connection                             | Rejected. Thread count grows linearly with connections, and data still has to be marshaled back onto the EventLoop.                                                                                                                                                        |
+| Scheduled EventLoop polling                                                   | **Adopted.** The current loop makes 2–3 JNI calls per iteration (sub-microsecond), and fixed 5ms polling has already proven workable; only adaptive behavior is needed.                                                                                                    |
 
-## 决策
+## Decision
 
-沿用 `AbstractChannel` + `scheduleAtFixedRate` 轮询架构，参数改为 **步进退避**：
+Keep the `AbstractChannel` + `scheduleAtFixedRate` polling architecture, but change it to **stepped
+backoff**:
 
-- **握手/连接期**：固定 5ms（快速感知 STATE_CONNECTED/FAILED/CLOSED，支撑 10s/20s 超时判定）。
-- **已连接期**：活跃（本轮有数据或写队列非空）保持 5ms；连续空转按 5→10→20→40ms 步进退避， 上限 40ms（一个
-  MC tick）；任何数据到达或写排队立即复位 5ms。
-- 读路径维持现状：池化 direct buffer + `readChunkInto`，单轮最多 16 次读防独占 EventLoop。
-- 写路径维持现状：FastThreadLocal 复用 scratch `byte[]` + `writeChunk`，队列满靠下一轮 flush 重试。
+- **Handshake/connection phase**: fixed 5ms polling to detect STATE_CONNECTED/FAILED/CLOSED quickly
+  and support 10s/20s timeout decisions.
+- **Connected phase**: stay at 5ms while active (data observed in the current iteration or a
+  non-empty write queue); consecutive idle iterations back off 5→10→20→40ms, capped at 40ms (one MC
+  tick). Any incoming data or queued write immediately resets to 5ms.
+- Keep the current read path: pooled direct buffer + `readChunkInto`, at most 16 reads per iteration
+  to avoid monopolizing the EventLoop.
+- Keep the current write path: FastThreadLocal-reused scratch `byte[]` + `writeChunk`; if the queue
+  is full, retry on the next flush cycle.
 
-## 后果
+## Consequences
 
-- 空闲连接 CPU 开销趋零（最坏 25 次 JNI 调用/秒/连接）；活跃延迟上限仍 5ms。
-- 若 profile 实测 5ms 成为瓶颈，再评估 wakeup fd 方案（届时可考虑 Netty epoll transport 的 native
-  扩展点），不在本期范围。
+- Idle-connection CPU overhead approaches zero (worst case 25 JNI calls/second/connection), while
+  active latency remains capped at 5ms.
+- If profiling shows 5ms polling is a bottleneck, revisit a wakeup-fd design, potentially using
+  extension points in Netty's epoll transport; that is outside the current scope.

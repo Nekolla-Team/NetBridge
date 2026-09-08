@@ -1,4 +1,4 @@
-//! KCP 传输（kcp-rs + FECStream + smux）。
+//! KCP transport using kcp-rs + FECStream + smux.
 
 pub mod client;
 pub mod config;

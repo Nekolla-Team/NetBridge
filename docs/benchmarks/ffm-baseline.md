@@ -1,27 +1,31 @@
-# FFM 数据面基准基线
+# FFM Data-Plane Benchmark Baseline
 
-按方案 §24 的要求建立的可重复基准。JNI 时代基线在 cutover 前未单独存档（Phase 0 冻结的是测试基线），因此本基线为
-FFM 数据面的**首次定量记录**；性能验收不以"快于 JNI X%"为 目标，而以方案 §24.5 为准：
+This repeatable benchmark was established as required by plan §24. No separate JNI-era benchmark
+baseline was archived before cutover (Phase 0 froze the test baseline), so this is the **first
+quantitative record** of the FFM data plane. Performance acceptance is not defined as
+"X% faster than JNI"; it follows plan §24.5 instead:
 
-- 无固定轮询唤醒（idle CPU 不因事件模型退化）；
-- 写路径无 Java heap `byte[]` 中转；
-- 吞吐无未解释的显著回退；
-- 回调风暴下 p99 不显著恶化；
-- 内存增长有界（重复 backend/context 生命周期测试断言注册表归零）。
+- no fixed polling wakeups, so idle CPU does not regress because of the event model;
+- no Java heap `byte[]` intermediate on the write path;
+- no unexplained material throughput regression;
+- no material p99 degradation under callback storms;
+- bounded memory growth, with repeated backend/context lifecycle tests asserting that registries
+  return to zero.
 
-## 运行方式
+## How to Run
 
 ```bash
-./gradlew :common:ffmBenchmark                    # 默认 5 秒吞吐窗口
-./gradlew :common:ffmBenchmark --args="<lib> 10"  # 指定 cdylib 与秒数
+./gradlew :common:ffmBenchmark                    # default 5-second throughput window
+./gradlew :common:ffmBenchmark --args="<lib> 10"  # specify cdylib and duration in seconds
 ```
 
-harness 位于 `common/src/benchmark/java/.../FfmBenchmark.java`，不进入 mod jar。 项目：空 downcall（
-`connection_state`）、1KiB/64KiB write+read 往返、QUIC loopback 吞吐与 chunk 级延迟分位。
+The harness is in `common/src/benchmark/java/.../FfmBenchmark.java` and is not included in the mod
+jar. Cases include an empty downcall (`connection_state`), 1KiB/64KiB write+read round trips, QUIC
+loopback throughput, and per-chunk latency percentiles.
 
-## 基线样本
+## Baseline Sample
 
-环境：WSL2 (linux-x86_64)，debug cdylib，Java 25，2026-09-04。
+Environment: WSL2 (linux-x86_64), debug cdylib, Java 25, 2026-09-04.
 
 ```text
 empty downcall (connection_state)  ops=20000  avg=    0.03 us/op
@@ -33,5 +37,7 @@ QUIC loopback throughput          throughput       60.3 MiB/s  (301 MiB sent in 
 QUIC loopback throughput          p50=   40.59 us  p95=  610.63 us  p99= 1971.24 us  (n=27939)
 ```
 
-复跑时更新本文件并注明环境（OS/arch、profile、日期）。数值仅用于回归对比，不作绝对承诺；如吞吐/延迟出现 >
-5–10% 的未解释回退，按方案要求 profile 并记录原因。
+When rerunning, update this file and record the environment (OS/arch, profile, date). Values are for
+regression comparison only and are not absolute guarantees. If throughput or latency regresses by
+more than roughly 5–10% without an explanation, profile it as required by the plan and record the
+cause.

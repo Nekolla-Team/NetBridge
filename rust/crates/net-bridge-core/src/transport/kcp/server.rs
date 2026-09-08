@@ -1,4 +1,4 @@
-//! KCP 服务端：acceptor 生命周期与连接接纳（kcp-rs 内建握手）。
+//! KCP server: acceptor lifecycle and connection admission using the built-in kcp-rs handshake.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::error::{BridgeError, Transport};
 use crate::socket_util;
 use crate::{ServerHandle, TransportEndpoint, try_admit};
 
-/// 经 NativeContext 启动 KCP 服务端。
+/// Starts a KCP server through NativeContext.
 pub fn start_server_in_context(
     ctx: &Arc<crate::context::NativeContext>,
     port: u16,
@@ -52,7 +52,7 @@ pub fn start_server_in_context(
         Err(_) => Err(BridgeError::Timeout),
     };
     if result.is_err() {
-        // 启动窗口超时：回滚任何已插入的 registry 条目，杜绝 orphan server。
+        // Startup window timed out: roll back any inserted registry entry to prevent an orphan server.
         ctx.servers_map().remove(&server_id);
     }
     result
@@ -96,7 +96,7 @@ async fn server_task_in_context(
         }),
     );
     if tx.send(Ok(local.port())).is_err() {
-        // 启动等待已超时/接收端已 drop：回滚注册表并立即退出，杜绝 orphan server
+        // Startup wait already timed out or the receiver was dropped: roll back the registry and exit immediately to prevent an orphan server
         ctx.servers_map().remove(&server_id);
         drop(listener);
         return;
@@ -187,16 +187,17 @@ async fn accept_loop_in_context(
             ),
         );
     }
-    // Accept loop 已停止接纳新连接。
-    // 立即通知停止完成，使 stop_server 不阻塞，服务端状态转为 STOPPED（INV-2, INV-9）。
+    // The accept loop has stopped admitting new connections. Notify stop completion immediately so
+    // stop_server does not block, and transition server state to STOPPED (INV-2, INV-9).
     let (lock, cvar) = &*stopped_pair;
     if let Ok(mut g) = lock.lock() {
         *g = true;
         cvar.notify_all();
     }
 
-    // 若仍有被 Java 接管的存活连接（conn_count > 0），在后台保留底层 listener 驱动已有 session 数据面；
-    // 任何新进连接均立即丢弃（绝不 admit、绝不发布 ACCEPTED）。
+    // If Java still owns live connections (conn_count > 0), keep the underlying listener running in
+    // the background to drive existing session data planes; Drop every newly arriving connection
+    // immediately; never admit it and never publish ACCEPTED.
     while conn_count.load(Ordering::SeqCst) > 0 {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(20)) => {},

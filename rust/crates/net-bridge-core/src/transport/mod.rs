@@ -1,21 +1,21 @@
-//! 传输类别与实现模块。
+//! Transport categories and implementation modules.
 
 pub mod kcp;
 pub mod quic;
 
 use crate::error::Transport;
 
-/// 传输实现类别。
+/// Transport implementation category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
-    /// quinn-plaintext 明文 QUIC。
+    /// Plaintext QUIC via quinn-plaintext.
     Quic,
-    /// kcp-rs + FEC + smux 多路流控 KCP。
+    /// KCP via kcp-rs + FEC + smux multiplexing and flow control.
     Kcp,
 }
 
 impl TransportKind {
-    /// 整型标签解析：0 = QUIC，1 = KCP；其余非法返回 None。
+    /// Parses integer tags: 0 = QUIC, 1 = KCP; all other values are invalid and return None.
     pub fn from_jint(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Quic),
@@ -24,7 +24,7 @@ impl TransportKind {
         }
     }
 
-    /// 错误信息用的传输标签（与 [`BridgeError`] 的 Transport 对应）。
+    /// Transport label used in error messages, corresponding to [`BridgeError`] Transport.
     pub fn label(self) -> Transport {
         match self {
             Self::Quic => Transport::Quic,

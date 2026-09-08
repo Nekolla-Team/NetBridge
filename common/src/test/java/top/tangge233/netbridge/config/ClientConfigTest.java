@@ -91,7 +91,7 @@ class ClientConfigTest {
         assertEquals(
                 KcpProfile.BALANCE,
                 settings.kcpProfile(),
-                "未知 profile 应回退默认 BALANCE"
+                "Unknown profile should fall back to default BALANCE"
         );
     }
 
@@ -131,12 +131,12 @@ class ClientConfigTest {
         assertEquals(
                 TransportMode.TCP,
                 settings.mode(),
-                "非字符串 mode 仅回退默认 TCP"
+                "Non-string mode should fall back only to default TCP"
         );
         assertEquals(
                 KcpProfile.AGGRESSIVE,
                 settings.kcpProfile(),
-                "坏 mode 不应影响合法 profile"
+                "Invalid mode should not affect a valid profile"
         );
     }
 
@@ -162,7 +162,7 @@ class ClientConfigTest {
         assertEquals(
                 KcpProfile.BALANCE,
                 settings.kcpProfile(),
-                "坏 profile 仅回退默认 BALANCE"
+                "Invalid profile should fall back only to default BALANCE"
         );
     }
 
@@ -224,7 +224,7 @@ class ClientConfigTest {
             assertEquals(
                     1,
                     names.size(),
-                    "保存后目录应只剩 client.toml"
+                    "Only client.toml should remain in the directory after saving"
             );
             assertEquals(
                     "client.toml",

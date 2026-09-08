@@ -1,4 +1,4 @@
-//! KCP 门面集成测试：真实 KCP 往返、关闭传播（含探测帧路径）。
+//! KCP facade integration tests: real KCP round trips and close propagation, including the probe-frame path.
 
 use bytes::Bytes;
 use std::time::{Duration, Instant};
@@ -264,9 +264,9 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
     assert_eq!(wait_read(&ctx, server_conn, 7), b"warm-up");
 
     // Stop server
-    assert!(ctx.stop_server(server).is_ok(), "stop server 必须成功");
+    assert!(ctx.stop_server(server).is_ok(), "stop server must succeed");
 
-    // 已被 Java 接管的已建连连接必须依然存活且可正常 I/O
+    // Established connections already owned by Java must remain alive and support normal I/O
     let payload = b"kcp data after server stopped";
     assert_eq!(
         ctx.write_chunk(client, Bytes::copy_from_slice(payload))
@@ -283,7 +283,7 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
     );
     assert_eq!(wait_read(&ctx, client, reply.len()), reply);
 
-    // 清理连接
+    // Clean up the connection
     ctx.close_connection(client);
     ctx.close_connection(server_conn);
 }

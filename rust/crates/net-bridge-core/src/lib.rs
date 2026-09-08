@@ -25,61 +25,69 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-/// 发往传输写任务的通用控制命令。
+/// Generic control command sent to a transport write task.
 #[derive(Debug)]
 pub enum Command {
     Write(Bytes),
     Close,
 }
 
-/// 内部连接状态常量（core 内部值；对外暴露时经 `abi_connection_state` 映射为 ABI 值 1..4）。
+/// Internal connection-state constants; core values are mapped to ABI values 1..4 through
+/// `abi_connection_state` when exposed.
 pub const STATE_CONNECTING: u32 = 0;
 pub const STATE_CONNECTED: u32 = 1;
 pub const STATE_CLOSED: u32 = 2;
 pub const STATE_FAILED: u32 = 3;
 
-/// 内部服务端状态常量。
+/// Internal server-state constants.
 pub const SERVER_STATE_RUNNING: u8 = 1;
 pub const SERVER_STATE_STOPPED: u8 = 2;
 pub const SERVER_STATE_FAILED: u8 = 3;
 
-/// 默认出站/入站单连接字节预算上限 (4 MiB)
+/// Default per-connection outbound/inbound byte-budget limit (4 MiB)
 pub const DEFAULT_MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
-/// 单次 I/O chunk 最大上限 (64 KiB)
+/// Maximum size of a single I/O chunk (64 KiB)
 pub const MAX_IO_CHUNK: usize = 64 * 1024;
 
-/// 单条连接的句柄。
+/// Handle for a single connection.
 pub struct ConnHandle {
     pub state: Arc<AtomicU32>,
-    /// Java 读侧 chunk 队列 + 未取走的残留块。Bytes 共享视图切分零拷贝；
-    /// Arc 化：读路径克隆后即可释放 DashMap guard。
+    /// Java read-side chunk queue plus an unconsumed remainder. Bytes shared views are sliced zero-copy;
+    /// stored behind Arc so the read path can clone it and release the DashMap guard immediately.
     pub to_java: Arc<Mutex<(mpsc::Receiver<Bytes>, VecDeque<Bytes>)>>,
     pub to_transport: mpsc::Sender<Command>,
     pub cts: CancellationToken,
     /// 入站容量释放通知，唤醒读数据面。
     pub read_waker: Arc<tokio::sync::Notify>,
     pub server_id: Option<u64>,
-    /// 服务端连接的每实例活跃计数（客户端连接为 None）；remove 时递减。
+    /// Per-instance active count for server connections (None for client connections); decremented on
+    /// removal.
     pub server_count: Option<Arc<AtomicUsize>>,
-    /// 连接期即可写入：KCP 客户端握手未完成时允许写入（命令先入 channel，
-    /// 握手完成后立即下发；kcp-rs 内建握手，不依赖首帧判定）。QUIC 客户端为 false。
+    /// Writes are allowed during connection establishment: a KCP client may write before its handshake
+    /// completes (the command enters the channel first, then is sent immediately after the handshake;
+    /// kcp-rs has a built-in handshake and does not depend on first-frame detection). False for QUIC
+    /// clients.
     pub early_write: bool,
-    /// 写队列满 / byte budget 耗尽 → 传输任务消费出空间后清零并 edge-trigger 发 WRITABLE。
+    /// Write queue full / byte budget exhausted: clear the blocked state after the transport task frees
+    /// capacity and edge-trigger WRITABLE.
     pub write_blocked: Arc<AtomicBool>,
-    /// 在途出站字节数（FFI write 增加，传输任务消费后减少）。
+    /// In-flight outbound byte count, increased by FFI write and decreased when the transport task
+    /// consumes data.
     pub outbound_bytes: Arc<AtomicUsize>,
-    /// 在途入站字节数（传输 reader 读入增加，Java read 消费后减少）。
+    /// In-flight inbound byte count, increased by the transport reader and decreased by Java reads.
     pub inbound_bytes: Arc<AtomicUsize>,
-    /// 终态事件（FAILED/CLOSED）只发一次的闸。
+    /// Gate that ensures terminal events (FAILED/CLOSED) are emitted only once.
     pub terminal_sent: AtomicBool,
-    /// 连接真实对端地址（Java 侧 ban/限速等 IP 管控）。
+    /// Actual peer address for the connection, used by Java-side IP controls such as bans and rate
+    /// limits.
     pub remote_addr: std::sync::RwLock<Option<SocketAddr>>,
-    /// 串行化连接事件以保证终态事件之后绝无非终态事件。
+    /// Serializes connection events to ensure no non-terminal event can occur after a terminal event.
     event_lock: Mutex<()>,
 }
 
 impl ConnHandle {
-    /// 构造句柄：读侧 channel 与空残留队列包装进共享锁。
+    /// Constructs the handle by wrapping the read-side channel and empty remainder queue in a shared
+    /// lock.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<AtomicU32>,
@@ -109,8 +117,10 @@ impl ConnHandle {
         }
     }
 
-    /// 尝试发送非终态事件（DATA_AVAILABLE / WRITABLE）。如果终态已标记或已发出，则静默丢弃。
-    /// 关键：释放锁后才调用 foreign callback（INV-4）。
+    /// Attempts to emit a non-terminal event (DATA_AVAILABLE / WRITABLE). Silently drop it if terminal
+    /// state is marked or already emitted.
+    ///
+    /// Important: invoke the foreign callback only after releasing the lock (INV-4).
     pub fn emit_non_terminal(
         &self,
         sink: &dyn EventSink,
@@ -120,10 +130,7 @@ impl ConnHandle {
         arg1: i64,
     ) -> bool {
         let should_emit = {
-            let _guard = match self.event_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let _guard = self.event_lock.lock().unwrap_or_else(|p| p.into_inner());
             !self.terminal_sent.load(Ordering::SeqCst)
         };
         if should_emit {
@@ -134,14 +141,13 @@ impl ConnHandle {
         }
     }
 
-    /// 原子触发连接成功状态事件（CONNECTED）。如果终态已标记则静默丢弃。
-    /// 关键：释放锁后才调用 foreign callback（INV-4）。
+    /// Atomically emits the successful connection-state event (CONNECTED). Silently drop it if terminal
+    /// state is already marked.
+    ///
+    /// Important: invoke the foreign callback only after releasing the lock (INV-4).
     pub fn emit_connected(&self, sink: &dyn EventSink, conn_id: u64) -> bool {
         let should_emit = {
-            let _guard = match self.event_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let _guard = self.event_lock.lock().unwrap_or_else(|p| p.into_inner());
             if self.terminal_sent.load(Ordering::SeqCst) {
                 false
             } else {
@@ -151,9 +157,9 @@ impl ConnHandle {
         };
         if should_emit {
             sink.on_event(
-                crate::event::NB_EVENT_CONNECTION_STATE,
+                event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
-                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
+                event::abi_connection_state(STATE_CONNECTED) as i64,
                 0,
             );
             true
@@ -162,8 +168,10 @@ impl ConnHandle {
         }
     }
 
-    /// 原子触发终态事件（FAILED/CLOSED）恰好一次，并设立硬性事件屏障（杜绝任何后续事件）。
-    /// 关键：释放锁后才调用 foreign callback（INV-4）。
+    /// Atomically emits a terminal event (FAILED/CLOSED) exactly once and establishes a hard event
+    /// barrier preventing all later events.
+    ///
+    /// Important: invoke the foreign callback only after releasing the lock (INV-4).
     pub fn emit_terminal(
         &self,
         sink: &dyn EventSink,
@@ -172,10 +180,7 @@ impl ConnHandle {
         reason_code: i64,
     ) -> bool {
         let should_emit = {
-            let _guard = match self.event_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let _guard = self.event_lock.lock().unwrap_or_else(|p| p.into_inner());
             if self.terminal_sent.swap(true, Ordering::SeqCst) {
                 false
             } else {
@@ -185,9 +190,9 @@ impl ConnHandle {
         };
         if should_emit {
             sink.on_event(
-                crate::event::NB_EVENT_CONNECTION_STATE,
+                event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
-                crate::event::abi_connection_state(internal_state) as i64,
+                event::abi_connection_state(internal_state) as i64,
                 reason_code,
             );
             true
@@ -197,19 +202,20 @@ impl ConnHandle {
     }
 }
 
-/// 注册表中的服务端句柄。endpoint 为多态传输端点；计数与上限为本实例私有。
+/// Server handle stored in the registry. The endpoint is a polymorphic transport endpoint; counters and
+/// limits are private to this instance.
 pub struct ServerHandle {
     pub endpoint: TransportEndpoint,
     pub port: u16,
-    /// 本实例活跃连接上限（accept 阶段超限即丢弃）。
+    /// Active-connection limit for this instance; excess accepts are dropped.
     pub max_connections: usize,
-    /// 本实例活跃连接数（独立于其他 server 实例）。
+    /// Active connection count for this instance, independent of other server instances.
     pub conn_count: Arc<AtomicUsize>,
-    /// 服务端运行状态：RUNNING(1), STOPPED(2), FAILED(3)。
+    /// Server runtime state: RUNNING(1), STOPPED(2), FAILED(3).
     pub state: Arc<AtomicU8>,
-    /// 串行化 accept commit 与 stop 线性化点。
+    /// Serializes the linearization points for accept commit and stop.
     pub commit_lock: Arc<Mutex<()>>,
-    /// 停止完成同步通知。
+    /// Synchronization notification for stop completion.
     pub stopped_pair: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
 
@@ -219,20 +225,21 @@ impl ServerHandle {
     }
 }
 
-/// 传输端点：`stop_server` 按此分支关闭。
+/// Transport endpoint; `stop_server` closes it according to this variant.
 pub enum TransportEndpoint {
-    Quic(tokio::sync::mpsc::Sender<()>),
-    /// KCP 停止触发器：发送即令 accept 任务退出并 Drop listener
-    /// （中止任务、关闭 socket）。listener 本体留在 accept 任务内。
-    Kcp(tokio::sync::mpsc::Sender<()>),
+    Quic(mpsc::Sender<()>),
+    /// KCP stop trigger: sending it makes the accept task exit and drop the listener (aborting the task
+    /// and closing the socket). The listener itself remains owned by the accept task.
+    Kcp(mpsc::Sender<()>),
 }
 
-/// 错误即时上报：stderr 由 Minecraft 启动器重定向进 logs/latest.log。
+/// Report errors immediately to stderr, which the Minecraft launcher redirects to logs/latest.log.
 pub fn report_error(msg: String) {
     eprintln!("[net-bridge-native] error: {msg}");
 }
 
-/// 尝试把一条新连接计入服务端实例活跃数；超限回滚并拒绝。
+/// Attempts to count a new connection against the server instance; rolls back and rejects it if the
+/// limit is exceeded.
 pub(crate) fn try_admit(count: &AtomicUsize, max: usize) -> bool {
     let prev = count.fetch_add(1, Ordering::Relaxed);
     if prev >= max {
@@ -242,7 +249,7 @@ pub(crate) fn try_admit(count: &AtomicUsize, max: usize) -> bool {
     true
 }
 
-/// 提取 panic payload 的可读信息；非字符串 payload 记占位。
+/// Extracts readable text from a panic payload; non-string payloads use a placeholder.
 fn describe_panic(payload: &Box<dyn Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()

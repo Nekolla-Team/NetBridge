@@ -1,4 +1,4 @@
-//! net-bridge-native：QUIC / KCP 传输的 C ABI v1 层。
+//! net-bridge-native: C ABI v1 layer for QUIC / KCP transport.
 
 pub mod abi;
 

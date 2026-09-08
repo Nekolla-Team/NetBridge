@@ -1,54 +1,74 @@
-# ADR-0008: 传输握手超时与存活判定
+# ADR-0008: Transport Handshake Timeout and Liveness Criteria
 
-状态：已接受（Java 25 + FFM Round 4 修正） · 日期：2026-08-26 · 依赖：ADR-0002（watchdog 定义）
+Status: Accepted (Java 25 + FFM Round 4 revision) · Date: 2026-08-26 · Depends on: ADR-0002
+(watchdog definition)
 
-> 实现备注：看门狗现在由 client runtime 的 `ConnectionPlanner` / `ConnectionExecutor`
-> （`NativeRetryPolicy` 10s/20s）承载，不再是旧 static `HandshakeWatchdog` 工具类。
-> 握手与 CONNECTED 存活判定在 Round 4 中统一为数据面就绪契约：KCP 完成 SYN + FEC + smux stream
-> 打开，QUIC 完成明文握手 + stream 探针就绪。
+> Implementation note: the watchdog is now owned by the client runtime's `ConnectionPlanner` /
+> `ConnectionExecutor`
+> (`NativeRetryPolicy` 10s/20s), not the old static `HandshakeWatchdog` utility.
+> In Round 4, handshake and CONNECTED liveness criteria were unified around data-plane readiness:
+> KCP completes SYN + FEC + smux stream
+> opening; QUIC completes the plaintext handshake + stream-probe readiness.
 
-## 背景
+## Context
 
-ADR-0002 规定握手失败判定为 Java 侧 10s/20s 超时。调查三个依赖库能否原生承担该职责 （本地锁定版本：quinn
-0.11.11 / quinn-proto 0.11.17 / quinn-plaintext 0.3.0 / kcp-rs 0.2.6）。
+ADR-0002 specifies Java-side 10s/20s timeouts to decide handshake failure. We investigated whether
+the three dependency libraries could natively own that responsibility (using locally pinned
+versions: quinn 0.11.11 / quinn-proto 0.11.17 / quinn-plaintext 0.3.0 / kcp-rs 0.2.6).
 
-### QUIC 调查结论
+### QUIC Findings
 
-- quinn-plaintext 仅实现 `crypto::Session`/`ClientConfig`/`ServerConfig` 明文替换， 不涉及任何超时机制；quinn
-  全部传输配置可用但与本问题无关。
-- quinn-proto 的 `Timer::Idle`（触发 `ConnectionError::TimedOut`）仅在
-  `on_packet_authenticated → reset_idle_timeout` 布防—— **只在收到包时重置，连接创建时不设初值**。
-- 黑洞场景（零响应）：loss detection 的 PTO 探针无限重传（`pto_count` 无上限、无放弃逻辑）， Idle
-  永不触发 ⇒ `connecting.await` **永久悬挂**。
-- 有响应后断流：需等 `max(协商 idle timeout 默认 30s, 3×PTO)` 才报 TimedOut，远超目标。
+- quinn-plaintext only replaces `crypto::Session`/`ClientConfig`/`ServerConfig` with plaintext
+  implementations and does not provide timeout behavior; the rest of quinn transport configuration
+  is available but does not solve this problem.
+- quinn-proto's `Timer::Idle` (which produces `ConnectionError::TimedOut`) is armed only through
+  `on_packet_authenticated → reset_idle_timeout` — **it is reset only after receiving a packet and
+  has no initial value at connection creation**.
+- In a black-hole scenario (zero response), loss detection sends PTO probes forever (`pto_count` has
+  no upper bound and no give-up logic), so Idle never fires and `connecting.await` **hangs
+  indefinitely**.
+- After communication has begun and then stalls, timeout is
+  `max(negotiated idle timeout, default 30s, 3×PTO)`, far above the target.
 
-结论：quinn 无法在 10s/20s 内自行终结黑洞握手。
+Conclusion: quinn cannot terminate a black-hole handshake by itself within 10s/20s.
 
-### KCP 调查结论（kcp-rs 更新）
+### KCP Findings (After kcp-rs Update)
 
-- kcp-rs 内建握手：客户端 `KcpStream::connect` 发 SYN（含随机会话 id），等待服务端确认后 返回——
-  `connect_timeout`（原生默认 15s，本栈设为 8s）内无应答即 `TimedOut`，native 层可 判定失败，不再依赖首帧猜测。
-- `session_expire`（默认 90s）仍为服务端闲置会话回收，与建连无关。
-- 历史阶段曾将 KCP CONNECTED 暂定为「SYN 握手完成」；但在完整数据面中，会话必须完成 FEC 与 smux stream
-  就绪才具备数据传输能力。因此自 Round 4 起，最终统一为「KCP 传输握手 + FEC + smux 会话建立并打开 MC
-  数据流就绪」才是 STATE_CONNECTED 与 ACCEPTED 的生效时刻。
+- kcp-rs has a built-in handshake: client `KcpStream::connect` sends SYN (with a random session ID),
+  waits for server confirmation, and then returns. If no response arrives within `connect_timeout`
+  (native default 15s; this stack uses 8s), it returns `TimedOut`, so the native layer can detect
+  failure without first-payload heuristics.
+- `session_expire` (default 90s) still governs idle server-session reclamation and is unrelated to
+  connection establishment.
+- An earlier phase tentatively treated KCP CONNECTED as "SYN handshake complete". In the full data
+  plane, however, the session is not usable until FEC and the smux stream are ready. Starting in
+  Round 4, the final rule is therefore: **KCP transport handshake + FEC + smux session
+  establishment + opened MC data stream**
+  is the point at which STATE_CONNECTED and ACCEPTED become valid.
 
-结论：KCP 握手超时可由 native 层自行终结（8s < Java watchdog 10s），watchdog 退化为兜底。
+Conclusion: the KCP handshake can terminate itself in native code (8s < the 10s Java watchdog),
+while the watchdog remains a safety net.
 
-## 决策
+## Decision
 
-1. **统一由 Java `HandshakeWatchdog` 承担握手超时**（首次 10s、后续 20s，竞速 connect promise）。 KCP 侧
-   native `connect_timeout`(8s) 先失败上报，watchdog 主要兜底 QUIC 黑洞。
-2. **KCP 存活判定**：STATE_CONNECTED 统一为 KCP SYN + FEC + smux stream 数据面完全就绪（客户端与服务端均在数据流打开后标记
-   CONNECTED / ACCEPTED，不提前暴露半建状态）。
-3. **QUIC 维持现状**：明文握手双向交换 transport params，CONNECTED 即真实可达证明； watchdog
-   超时后关闭连接句柄即可。
-4. 两栈其余参数保持默认：`max_idle_timeout`(30s) 管会话期存活，`ReadTimeoutHandler(30)` 管
-   应用层空闲，三者正交不混用。
+1. **Java owns the unified handshake timeout policy** (first attempt 10s, subsequent attempt 20s,
+   racing the connect promise). On KCP, native `connect_timeout` (8s) normally reports first; the
+   watchdog mainly protects against QUIC black holes.
+2. **KCP liveness criterion**: STATE_CONNECTED means the complete KCP SYN + FEC + smux stream data
+   plane is ready; both client and server mark CONNECTED / ACCEPTED only after the data stream is
+   open, never exposing a half-established state.
+3. **QUIC remains unchanged**: the plaintext handshake exchanges transport parameters
+   bidirectionally, so CONNECTED is real reachability proof; when the watchdog expires, closing the
+   connection handle is sufficient.
+4. Keep the remaining stack defaults: `max_idle_timeout` (30s) governs session liveness,
+   `ReadTimeoutHandler(30)` governs application-layer idleness, and the three mechanisms remain
+   orthogonal.
 
-## 后果
+## Consequences
 
-- watchdog 超时路径必须主动 `closeConnection(connId)` 清理 native 句柄（QUIC 黑洞下 native 任务仍在
-  PTO 空转，不清理则泄漏）。
-- KCP 握手共 1 RTT（SYN + 确认）；8s 预算在高延迟链路依然充足。旧「首字节判定」及 FRAME_PROBE/FRAME_PONG
-  探测帧随 kcp-rs 切换一并移除。
+- The watchdog timeout path must actively call `closeConnection(connId)` to clean up the native
+  handle. On a QUIC black hole the native task remains in the PTO loop, so failing to close it would
+  leak work and state.
+- The KCP handshake is 1 RTT (SYN + confirmation); an 8s budget is still ample on high-latency
+  paths. The old "first-byte" criterion and FRAME_PROBE/FRAME_PONG probe frames were removed as part
+  of the kcp-rs transition.

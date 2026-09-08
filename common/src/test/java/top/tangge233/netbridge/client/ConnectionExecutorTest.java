@@ -186,7 +186,7 @@ class ConnectionExecutorTest {
             assertEquals(
                     1,
                     adapter.openTcpCount.get(),
-                    "重试耗尽后回退 TCP 一次"
+                    "Fall back to TCP exactly once after retries are exhausted"
             );
         }
     }
@@ -214,11 +214,11 @@ class ConnectionExecutorTest {
             );
             assertTrue(
                     future.await(15, TimeUnit.SECONDS),
-                    "native 成功路径应在超时内完成"
+                    "Native success path should complete before the timeout"
             );
             assertTrue(
                     future.isSuccess(),
-                    "native 成功路径应成功"
+                    "Native success path should succeed"
             );
             assertEquals(
                     0,
@@ -231,7 +231,7 @@ class ConnectionExecutorTest {
             );
             assertTrue(
                     lookup.isPresent(),
-                    "成功端点应写入缓存"
+                    "Successful endpoint should be stored in the cache"
             );
             assertEquals(
                     endpoint.getPort(),

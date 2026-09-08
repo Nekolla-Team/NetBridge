@@ -28,7 +28,7 @@ class FfmLifecycleHardeningTest {
 
     @BeforeAll
     static void setUp() {
-        nativeLibPath = FfmTestSupport.findNativeLibrary();
+        nativeLibPath = FfmTestSupport.requireNativeLibraryOrSkip();
     }
 
     @Test
@@ -61,7 +61,7 @@ class FfmLifecycleHardeningTest {
 
             assertTrue(
                     accepted.await(5, TimeUnit.SECONDS),
-                    "listener 安装前到达的 ACCEPTED 必须回放，不得 orphan"
+                    "ACCEPTED arriving before listener installation must be replayed and not orphaned"
             );
             assertNotNull(acceptedRef.get());
             client.close();
@@ -80,7 +80,7 @@ class FfmLifecycleHardeningTest {
         assertEquals(
                 want,
                 conn.state(),
-                "等待连接状态 " + want + " 超时"
+                "Timed out waiting for connection state " + want
         );
     }
 
@@ -187,11 +187,11 @@ class FfmLifecycleHardeningTest {
                     .toList();
             assertFalse(
                     ctxAClientEvents.isEmpty(),
-                    "context A 必须收到自己的连接事件"
+                    "Context A must receive its own connection events"
             );
             assertFalse(
                     ctxBClientEvents.isEmpty(),
-                    "context B 必须收到自己的连接事件"
+                    "Context B must receive its own connection events"
             );
 
             ctxA.shutdown(1000);
@@ -268,7 +268,7 @@ class FfmLifecycleHardeningTest {
         errors.stream()
                 .filter(e -> !(e instanceof NativeException))
                 .forEach(e -> fail(
-                        "close 与 downcall 竞态中出现非 typed 异常: " + e,
+                        "Unexpected untyped exception in close/downcall race: " + e,
                         e
                 ));
         assertTrue(true);

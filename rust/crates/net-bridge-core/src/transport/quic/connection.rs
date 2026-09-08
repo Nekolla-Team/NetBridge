@@ -1,4 +1,4 @@
-//! 单连接 QUIC 数据面：读写循环与关闭传播。
+//! Single-connection QUIC data plane: read/write loops and close propagation.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -11,8 +11,9 @@ use crate::context::NativeContext;
 use crate::event::NB_EVENT_DATA_AVAILABLE;
 use crate::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
 
-/// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
-/// 终态事件经 `ctx.emit_terminal` 恰好一次；entry 为 tombstone 直到 Java release。
+/// Single-connection read/write loop: the read side pushes into the Java queue, and the write side
+/// consumes Java commands. Terminal events are emitted exactly once through `ctx.emit_terminal`; the
+/// entry remains a tombstone until Java releases it.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection_with_sink(
     conn_id: u64,
@@ -83,7 +84,7 @@ pub async fn run_connection_with_sink(
                             quinn::ReadError::ClosedStream
                             | quinn::ReadError::ConnectionLost(quinn::ConnectionError::ApplicationClosed(_))
                             | quinn::ReadError::ConnectionLost(quinn::ConnectionError::LocallyClosed) => {
-                                // 远端正常关闭/应用级关闭/本地关闭
+                                // Remote graceful close / application close / local close
                                 break;
                             }
                             _ => {
@@ -98,7 +99,7 @@ pub async fn run_connection_with_sink(
                 }
             }
             _ = read_waker.notified(), if !can_read => {
-                // Java 侧消费了入站数据，唤醒重新检查 can_read
+                // Java consumed inbound data; wake the reader to recheck can_read
             }
             cmd = to_transport_rx.recv() => match cmd {
                 Some(Command::Write(bytes)) => {

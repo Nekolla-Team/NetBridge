@@ -1,21 +1,23 @@
-//! KCP 参数预设：balanced / aggressive 二档，不支持自定义。
+//! KCP parameter presets: balanced / aggressive; custom values are not supported.
 
 use std::time::Duration;
 
 use kcp::{KcpConfig, KcpNoDelayConfig};
 
-/// 传输预设：平衡（默认）与激进。
+/// Transport presets: balanced (default) and aggressive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KcpProfile {
-    /// nodelay=0/interval=40/resend=0/nc=0：标准 KCP，带宽友好。
+    /// nodelay=0/interval=40/resend=0/nc=0: standard KCP, bandwidth-friendly.
     #[default]
     Balanced,
-    /// nodelay=1/interval=10/resend=2/nc=1：极速模式，高丢包链路换延迟。
+    /// nodelay=1/interval=10/resend=2/nc=1: aggressive mode, trading bandwidth for latency on lossy
+    /// paths.
     Aggressive,
 }
 
 impl KcpProfile {
-    /// 解析配置中的 `profile` 字段；非法值返回 None（上层告警回退默认）。
+    /// Parses the configuration `profile` field; invalid values return None so the upper layer can warn
+    /// and fall back to the default.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "balance" | "balanced" => Some(Self::Balanced),
@@ -39,7 +41,8 @@ impl KcpProfile {
     }
 }
 
-/// 构建两端共用的 KCP 配置。参数为两端锁定的预设值，不支持自定义。
+/// Builds the KCP configuration shared by both endpoints. Parameters are fixed presets on both sides;
+/// custom values are not supported.
 pub fn build_config(profile: KcpProfile) -> KcpConfig {
     KcpConfig {
         mtu: 1400,
@@ -72,7 +75,10 @@ pub(crate) mod tests {
         assert_eq!(balanced.mtu, 1400);
         assert!(!balanced.stream, "Stream should disabled");
         assert_eq!((balanced.snd_wnd, balanced.rcv_wnd), (256, 256));
-        assert!(balanced.nodelay.nodelay, "MC 延迟敏感：nodelay 开启");
+        assert!(
+            balanced.nodelay.nodelay,
+            "MC is latency-sensitive: nodelay should be enabled"
+        );
         assert_eq!(balanced.nodelay.interval, 10);
         assert_eq!(balanced.nodelay.resend, 2);
         assert!(balanced.nodelay.nc);

@@ -1,4 +1,5 @@
-//! KCP 单连接数据面：smux 会话承载 MC 字节流，读写循环与关闭传播。
+//! KCP single-connection data plane: an smux session carries the MC byte stream, with read/write loops and
+//! close propagation.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -24,8 +25,8 @@ fn smux_config() -> Result<Config, String> {
         .map_err(|e| format!("smux config build failed: {e}"))
 }
 
-/// 终态事件经 `ctx.emit_terminal` 恰好一次；entry 为 tombstone 直到 Java release。
-/// 单层任务，无嵌套 spawn，无 detached reader（INV-6）。
+/// Terminal events are emitted exactly once through `ctx.emit_terminal`; the entry remains a tombstone
+/// until Java releases it. Single-layer task with no nested spawn and no detached reader (INV-6).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kcp_connection_with_sink(
     conn_id: u64,
@@ -96,7 +97,7 @@ pub async fn run_kcp_connection_with_sink(
                 }
             }
             _ = read_waker.notified(), if !can_read => {
-                // Java 侧消费了入站数据，唤醒重新检查 can_read
+                // Java consumed inbound data; wake the reader to recheck can_read
             }
             cmd = to_kcp_rx.recv() => {
                 let closed = match cmd {

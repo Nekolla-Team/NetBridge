@@ -4,11 +4,11 @@ import java.util.Locale;
 import org.jspecify.annotations.Nullable;
 
 /**
- * KCP 参数档（预设二档，不支持自定义）。
+ * KCP parameter profile. Two presets are provided; custom values are not supported.
  *
  * <ul>
- *   <li>{@link #BALANCE}：nodelay=0/interval=40/resend=0/nc=0，带宽友好。</li>
- *   <li>{@link #AGGRESSIVE}：nodelay=1/interval=10/resend=2/nc=1，高丢包链路换延迟。</li>
+ *   <li>{@link #BALANCE}: nodelay=0/interval=40/resend=0/nc=0, bandwidth-friendly.</li>
+ *   <li>{@link #AGGRESSIVE}: nodelay=1/interval=10/resend=2/nc=1, trading bandwidth for latency on lossy paths.</li>
  * </ul>
  */
 public enum KcpProfile {
@@ -17,8 +17,9 @@ public enum KcpProfile {
     AGGRESSIVE;
 
     /**
-     * 解析配置串；规范名 {@code balance}/{@code aggressive}， 历史别名 {@code balanced} 兼容接受。非法值返回
-     * null（调用方告警回退默认）。
+     * Parses a configuration value. Canonical names are {@code balance}/{@code aggressive}; the
+     * legacy alias {@code balanced} is also accepted. Invalid values return null so the caller can
+     * warn and use the default.
      */
     public static @Nullable KcpProfile parse(@Nullable String value) {
         return value == null
@@ -30,7 +31,7 @@ public enum KcpProfile {
                 };
     }
 
-    /** 配置文件中的规范字符串。 */
+    /** Canonical string used in configuration files. */
     public String configValue() {
         return this == AGGRESSIVE
                 ? "aggressive"
