@@ -153,7 +153,8 @@ impl NativeContext {
             }
         };
         if committed {
-            self.event_sink().on_event(
+            crate::publish_event(
+                self.event_sink().as_ref(),
                 crate::event::NB_EVENT_ACCEPTED,
                 server_id,
                 conn_id as i64,
@@ -177,7 +178,8 @@ impl NativeContext {
 
     /// Emits a server-state event (SERVER_STATE).
     pub(crate) fn emit_server_state(&self, server_id: u64, state: u8) {
-        self.event_sink().on_event(
+        crate::publish_event(
+            self.event_sink().as_ref(),
             crate::event::NB_EVENT_SERVER_STATE,
             server_id,
             state as i64,

@@ -54,6 +54,17 @@ pub(crate) fn report_error(msg: String) {
     eprintln!("[net-bridge-native] error: {msg}");
 }
 
+/// Single entry point for dispatching fixed-width events to the active sink.
+pub(crate) fn publish_event(
+    sink: &dyn EventSink,
+    event_kind: u32,
+    object_id: u64,
+    arg0: i64,
+    arg1: i64,
+) {
+    sink.on_event(event_kind, object_id, arg0, arg1);
+}
+
 /// Attempts to count a new connection against the server instance; rolls back and rejects it if the
 /// limit is exceeded.
 pub(crate) fn try_admit(count: &AtomicUsize, max: usize) -> bool {

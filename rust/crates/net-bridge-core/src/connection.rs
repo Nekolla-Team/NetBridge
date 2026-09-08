@@ -138,7 +138,7 @@ impl ConnHandle {
             !self.terminal_sent.load(Ordering::SeqCst)
         };
         if should_emit {
-            sink.on_event(kind, conn_id, arg0, arg1);
+            crate::publish_event(sink, kind, conn_id, arg0, arg1);
             true
         } else {
             false
@@ -157,7 +157,8 @@ impl ConnHandle {
             }
         };
         if should_emit {
-            sink.on_event(
+            crate::publish_event(
+                sink,
                 crate::event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
                 crate::event::abi_connection_state(STATE_CONNECTED) as i64,
@@ -187,7 +188,8 @@ impl ConnHandle {
             }
         };
         if should_emit {
-            sink.on_event(
+            crate::publish_event(
+                sink,
                 crate::event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
                 crate::event::abi_connection_state(internal_state) as i64,
