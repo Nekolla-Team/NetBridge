@@ -16,6 +16,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.stream.IntStream;
 import org.jspecify.annotations.Nullable;
 
+@SuppressWarnings("NullAway")
 public final class FfmBenchmark {
 
     private static final int WARMUP_OPS = 2_000;

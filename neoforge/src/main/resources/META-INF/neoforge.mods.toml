@@ -11,9 +11,5 @@ description = "QUIC transport capability for Minecraft (quinn-plaintext, transpa
 [[mixins]]
 config = "net-bridge-neoforge.mixins.json"
 
-[[dependencies.net_bridge]]
-modId = "java"
-type = "required"
-versionRange = "[25,)"
-ordering = "NONE"
-side = "BOTH"
+[features.net_bridge]
+javaVersion = "[25,)"
