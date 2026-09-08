@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use kcp::{KcpConfig, KcpUdpStream};
+use kcp::{KcpConfig, KcpStream, KcpUdpStream};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::config::{KcpProfile, build_config};
 use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
 use crate::socket_util;
-use crate::{ServerHandle, TransportEndpoint, try_admit};
+use crate::{ServerHandle, try_admit};
 
 /// Starts a KCP server through NativeContext.
 pub fn start_server_in_context(
@@ -28,21 +29,21 @@ pub fn start_server_in_context(
     let server_id = ctx.allocate_id()?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<u16, BridgeError>>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
     let ctx_clone = Arc::clone(ctx);
     ctx.spawn_server_task("kcp server task in context", server_id, async move {
-        let c = Arc::clone(&ctx_clone);
-        server_task_in_context(
-            c,
+        KcpServerTask {
+            ctx: ctx_clone,
             server_id,
             port,
             bind,
             max_connections,
             config,
-            tx,
-            stop_tx,
-            stop_rx,
-        )
+            startup_tx: tx,
+            shutdown: task_shutdown,
+        }
+        .run()
         .await;
     });
 
@@ -52,163 +53,183 @@ pub fn start_server_in_context(
         Err(_) => Err(BridgeError::Timeout),
     };
     if result.is_err() {
-        // Startup window timed out: roll back any inserted registry entry to prevent an orphan server.
+        shutdown.cancel();
         ctx.servers_map().remove(&server_id);
     }
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn server_task_in_context(
+struct KcpServerTask {
     ctx: Arc<crate::context::NativeContext>,
     server_id: u64,
     port: u16,
     bind: Option<IpAddr>,
     max_connections: usize,
     config: KcpConfig,
-    tx: std::sync::mpsc::Sender<Result<u16, BridgeError>>,
-    stop_tx: mpsc::Sender<()>,
-    mut stop_rx: mpsc::Receiver<()>,
-) {
-    let (listener, local) = match bind_listener(port, bind, max_connections, &config).await {
-        Ok(pair) => pair,
-        Err(msg) => {
-            let _ = tx.send(Err(msg));
-            return;
-        }
-    };
-    let conn_count = Arc::new(AtomicUsize::new(0));
-    let state = Arc::new(std::sync::atomic::AtomicU8::new(
-        crate::SERVER_STATE_RUNNING,
-    ));
-    let commit_lock = Arc::new(std::sync::Mutex::new(()));
-    let stopped_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    ctx.servers_map().insert(
-        server_id,
-        Arc::new(ServerHandle {
-            endpoint: TransportEndpoint::Kcp(stop_tx),
-            port: local.port(),
-            max_connections,
-            conn_count: Arc::clone(&conn_count),
-            state: Arc::clone(&state),
-            commit_lock: Arc::clone(&commit_lock),
-            stopped_pair: Arc::clone(&stopped_pair),
-        }),
-    );
-    if tx.send(Ok(local.port())).is_err() {
-        // Startup wait already timed out or the receiver was dropped: roll back the registry and exit immediately to prevent an orphan server
-        ctx.servers_map().remove(&server_id);
-        drop(listener);
-        return;
-    }
-    ctx.emit_server_state(server_id, crate::SERVER_STATE_RUNNING);
-
-    let ctx_clone = Arc::clone(&ctx);
-    accept_loop_in_context(
-        ctx_clone,
-        listener,
-        &mut stop_rx,
-        server_id,
-        max_connections,
-        conn_count,
-        stopped_pair,
-    )
-    .await;
+    startup_tx: std::sync::mpsc::Sender<Result<u16, BridgeError>>,
+    shutdown: CancellationToken,
 }
 
-async fn accept_loop_in_context(
+impl KcpServerTask {
+    async fn run(self) {
+        let (listener, local) =
+            match bind_listener(self.port, self.bind, self.max_connections, &self.config).await {
+                Ok(pair) => pair,
+                Err(error) => {
+                    let _ = self.startup_tx.send(Err(error));
+                    return;
+                }
+            };
+        let conn_count = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(
+            crate::SERVER_STATE_RUNNING,
+        ));
+        let commit_lock = Arc::new(std::sync::Mutex::new(()));
+        let stopped_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        self.ctx.servers_map().insert(
+            self.server_id,
+            Arc::new(ServerHandle {
+                shutdown: self.shutdown.clone(),
+                port: local.port(),
+                state: Arc::clone(&state),
+                commit_lock: Arc::clone(&commit_lock),
+                stopped_pair: Arc::clone(&stopped_pair),
+            }),
+        );
+        if self.startup_tx.send(Ok(local.port())).is_err() {
+            self.ctx.servers_map().remove(&self.server_id);
+            drop(listener);
+            return;
+        }
+        self.ctx
+            .emit_server_state(self.server_id, crate::SERVER_STATE_RUNNING);
+
+        KcpAcceptLoop {
+            ctx: self.ctx,
+            listener,
+            shutdown: self.shutdown,
+            server_id: self.server_id,
+            max_connections: self.max_connections,
+            conn_count,
+            stopped_pair,
+        }
+        .run()
+        .await;
+    }
+}
+
+struct KcpAcceptLoop {
     ctx: Arc<crate::context::NativeContext>,
-    mut listener: KcpUdpStream,
-    stop_rx: &mut mpsc::Receiver<()>,
+    listener: KcpUdpStream,
+    shutdown: CancellationToken,
     server_id: u64,
     max_connections: usize,
     conn_count: Arc<AtomicUsize>,
     stopped_pair: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-) {
-    loop {
+}
+
+impl KcpAcceptLoop {
+    async fn run(mut self) {
+        while self.accept_next().await {}
+        self.publish_stopped();
+        self.drain_adopted_connections().await;
+    }
+
+    async fn accept_next(&mut self) -> bool {
         let accepted = tokio::select! {
-            _ = stop_rx.recv() => None,
-            acc = listener.accept() => acc.ok(),
+            _ = self.shutdown.cancelled() => None,
+            accepted = self.listener.accept() => accepted.ok(),
         };
         let Some((stream, peer)) = accepted else {
-            break;
+            return false;
         };
-        if !admit(&conn_count, max_connections) {
-            continue;
+        if !admit(&self.conn_count, self.max_connections) {
+            return true;
         }
+        self.adopt(stream, peer).await;
+        true
+    }
+
+    async fn adopt(&mut self, stream: KcpStream, peer: SocketAddr) {
         let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-        let Ok(conn_id) = ctx.allocate_id() else {
-            conn_count.fetch_sub(1, Ordering::Relaxed);
-            continue;
+        let Ok(conn_id) = self.ctx.allocate_id() else {
+            self.conn_count.fetch_sub(1, Ordering::Relaxed);
+            return;
         };
-        let kcp_fec = FecStream::new(stream);
-        let Some((mc_stream, session)) =
-            super::connection::prepare_kcp_data_plane(conn_id, kcp_fec, false, &state, &ctx).await
-        else {
-            conn_count.fetch_sub(1, Ordering::Relaxed);
-            continue;
-        };
+        let (mc_stream, session) =
+            match super::connection::prepare_kcp_data_plane(FecStream::new(stream), false).await {
+                Ok(data_plane) => data_plane,
+                Err(error) => {
+                    crate::report_error(format!("kcp conn {conn_id}: {error}"));
+                    self.conn_count.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
+            };
         let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
         let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
-        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-
-        let handle = crate::ConnHandle::new(
+        let cancel = CancellationToken::new();
+        let data_plane_cancel = cancel.clone();
+        let handle = crate::ConnHandle::server(
             state.clone(),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            Some(server_id),
-            Some(Arc::clone(&conn_count)),
-            false,
-            Some(peer),
+            cancel,
+            Arc::clone(&self.conn_count),
+            peer,
         );
-
-        if !ctx.try_commit_accept(server_id, conn_id, Arc::new(handle)) {
-            conn_count.fetch_sub(1, Ordering::Relaxed);
+        if !self
+            .ctx
+            .try_commit_accept(self.server_id, conn_id, Arc::new(handle))
+        {
+            self.conn_count.fetch_sub(1, Ordering::Relaxed);
             let _ = session.close().await;
-            continue;
+            return;
         }
-
-        ctx.set_conn_remote_addr(conn_id, peer);
-
-        ctx.spawn_connection_task(
+        self.ctx.set_conn_remote_addr(conn_id, peer);
+        let counters = self
+            .ctx
+            .conns()
+            .get(&conn_id)
+            .map(|handle| handle.counters())
+            .unwrap_or_default();
+        self.ctx.spawn_connection_task(
             "kcp connection task in context",
             conn_id,
-            super::connection::run_kcp_connection_with_sink(
+            super::connection::KcpDataPlane {
                 conn_id,
-                mc_stream,
+                stream: mc_stream,
                 session,
-                cancel_rx,
+                cancel: data_plane_cancel,
                 to_transport_rx,
                 to_java_tx,
                 state,
-                false,
-                Arc::clone(&ctx),
-            ),
+                ctx: Arc::clone(&self.ctx),
+                counters,
+            }
+            .run(),
         );
     }
-    // The accept loop has stopped admitting new connections. Notify stop completion immediately so
-    // stop_server does not block, and transition server state to STOPPED (INV-2, INV-9).
-    let (lock, cvar) = &*stopped_pair;
-    if let Ok(mut g) = lock.lock() {
-        *g = true;
-        cvar.notify_all();
-    }
 
-    // If Java still owns live connections (conn_count > 0), keep the underlying listener running in
-    // the background to drive existing session data planes; Drop every newly arriving connection
-    // immediately; never admit it and never publish ACCEPTED.
-    while conn_count.load(Ordering::SeqCst) > 0 {
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
-            acc = listener.accept() => {
-                if let Ok((stream, _)) = acc {
-                    drop(stream);
-                }
-            },
+    fn publish_stopped(&self) {
+        let (lock, condvar) = &*self.stopped_pair;
+        if let Ok(mut stopped) = lock.lock() {
+            *stopped = true;
+            condvar.notify_all();
         }
     }
-    drop(listener);
+
+    async fn drain_adopted_connections(&mut self) {
+        while self.conn_count.load(Ordering::SeqCst) > 0 {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                accepted = self.listener.accept() => {
+                    if let Ok((stream, _)) = accepted {
+                        drop(stream);
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn bind_listener(

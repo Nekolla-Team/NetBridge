@@ -2,6 +2,7 @@
 
 pub mod api_v1;
 pub mod codec;
+mod decode;
 pub mod event_sink;
 pub mod guard;
 pub mod status;

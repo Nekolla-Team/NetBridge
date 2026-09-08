@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
@@ -21,17 +22,16 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel = CancellationToken::new();
+    let data_plane_cancel = cancel.child_token();
     let conn_id = ctx.allocate_id()?;
     ctx.conns().insert(
         conn_id,
-        Arc::new(ConnHandle::new(
+        Arc::new(ConnHandle::client(
             state.clone(),
             to_java_rx,
             to_transport_tx.clone(),
-            cancel_tx,
-            None,
-            None,
+            cancel,
             true,
             None,
         )),
@@ -43,18 +43,25 @@ pub fn connect_in_context(
         if let Some((conn, send, recv)) = establish(&ctx_task, &host, port, conn_id, &state).await {
             ctx_task.set_conn_remote_addr(conn_id, conn.remote_address());
             ctx_task.emit_connected(conn_id);
-            super::connection::run_connection_with_sink(
+            let counters = ctx_task
+                .conns()
+                .get(&conn_id)
+                .map(|handle| handle.counters())
+                .unwrap_or_default();
+            super::connection::QuicDataPlane {
                 conn_id,
                 conn,
-                cancel_rx,
+                cancel: data_plane_cancel,
                 send,
                 recv,
                 to_transport_rx,
                 to_java_tx,
-                to_transport_tx,
                 state,
-                Arc::clone(&ctx_task),
-            )
+                ctx: Arc::clone(&ctx_task),
+                counters,
+                empty_reads: 0,
+            }
+            .run()
             .await;
         } else {
             ctx_task.emit_terminal(conn_id);

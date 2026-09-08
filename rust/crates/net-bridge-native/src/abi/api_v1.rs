@@ -7,9 +7,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use net_bridge_core::context::CONTEXT_STATE_CLOSED;
+use net_bridge_core::event::abi_connection_state;
 use net_bridge_core::{BridgeError, NativeContext};
 
 use super::codec::*;
+use super::decode::{
+    decode_callbacks, decode_connect_options, decode_context_options, decode_server_options,
+};
 use super::event_sink::CAbiEventSink;
 use super::guard::ffi_guard;
 use super::status::*;
@@ -76,64 +80,16 @@ unsafe extern "C" fn context_create(
     out_context: *mut *mut NbContext,
 ) -> NbStatus {
     ffi_guard(|| {
-        if out_context.is_null() || callbacks.is_null() {
+        if out_context.is_null() {
             return NB_INVALID_ARGUMENT;
         }
-        let cb_size = unsafe { std::ptr::read_unaligned(callbacks as *const u32) };
-        if cb_size < NB_CALLBACKS_V1_MIN_SIZE {
-            return NB_INVALID_ARGUMENT;
-        }
-        let cb_reserved0 =
-            unsafe { std::ptr::read_unaligned((callbacks as *const u8).add(4) as *const u32) };
-        if cb_reserved0 != 0 {
-            return NB_INVALID_ARGUMENT;
-        }
-        let on_event_fn_ptr =
-            unsafe { std::ptr::read_unaligned((callbacks as *const u8).add(8) as *const usize) };
-        if on_event_fn_ptr == 0 {
-            return NB_INVALID_ARGUMENT;
-        }
-        let event_callback: NbEventCallbackV1 = unsafe { std::mem::transmute(on_event_fn_ptr) };
-
-        if cb_size >= size_of::<NbCallbacksV1>() as u32 {
-            let reserved_slice = unsafe {
-                let p = (callbacks as *const u8).add(16) as *const u64;
-                slice::from_raw_parts(p, 4)
-            };
-            if reserved_slice.iter().any(|&r| r != 0) {
-                return NB_INVALID_ARGUMENT;
-            }
-        }
-
-        let worker_threads = if !options.is_null() {
-            let opt_size = unsafe { std::ptr::read_unaligned(options as *const u32) };
-            if opt_size < NB_CONTEXT_OPTIONS_V1_MIN_SIZE {
-                return NB_INVALID_ARGUMENT;
-            }
-            let flags =
-                unsafe { std::ptr::read_unaligned((options as *const u8).add(4) as *const u32) };
-            if flags != 0 {
-                return NB_UNSUPPORTED;
-            }
-            let wt =
-                unsafe { std::ptr::read_unaligned((options as *const u8).add(8) as *const u32) };
-            let reserved0 =
-                unsafe { std::ptr::read_unaligned((options as *const u8).add(12) as *const u32) };
-            if reserved0 != 0 {
-                return NB_INVALID_ARGUMENT;
-            }
-            if opt_size >= size_of::<NbContextOptionsV1>() as u32 {
-                let reserved_slice = unsafe {
-                    let p = (options as *const u8).add(16) as *const u64;
-                    slice::from_raw_parts(p, 4)
-                };
-                if reserved_slice.iter().any(|&r| r != 0) {
-                    return NB_INVALID_ARGUMENT;
-                }
-            }
-            wt as usize
-        } else {
-            0
+        let event_callback = match unsafe { decode_callbacks(callbacks) } {
+            Ok(callback) => callback,
+            Err(status) => return status,
+        };
+        let worker_threads = match unsafe { decode_context_options(options) } {
+            Ok(worker_threads) => worker_threads,
+            Err(status) => return status,
         };
 
         let sink = Arc::new(CAbiEventSink::new(event_callback));
@@ -184,61 +140,32 @@ unsafe extern "C" fn connect(
     out_connection: *mut u64,
 ) -> NbStatus {
     ffi_guard(|| {
-        if context.is_null() || options.is_null() || out_connection.is_null() {
+        if context.is_null() || out_connection.is_null() {
             return NB_INVALID_ARGUMENT;
         }
-        let opt_size = unsafe { std::ptr::read_unaligned(options as *const u32) };
-        if opt_size < NB_CONNECT_OPTIONS_V1_MIN_SIZE {
-            return NB_INVALID_ARGUMENT;
-        }
-        let transport_kind_val =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(4) as *const u32) };
-        let host_view = unsafe {
-            let p = (options as *const u8).add(8) as *const NbBytesViewV1;
-            std::ptr::read_unaligned(p)
+        let options = match unsafe { decode_connect_options(options) } {
+            Ok(options) => options,
+            Err(status) => return status,
         };
-        let port =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(24) as *const u16) };
-        let reserved0 =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(26) as *const u16) };
-        if reserved0 != 0 {
-            return NB_INVALID_ARGUMENT;
-        }
-        let kcp_profile_val =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(28) as *const u32) };
-        let flags =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(32) as *const u32) };
-        if flags != 0 {
-            return NB_UNSUPPORTED;
-        }
-        if opt_size >= size_of::<NbConnectOptionsV1>() as u32 {
-            let reserved_slice = unsafe {
-                let p = (options as *const u8).add(40) as *const u64;
-                slice::from_raw_parts(p, 4)
-            };
-            if reserved_slice.iter().any(|&r| r != 0) {
-                return NB_INVALID_ARGUMENT;
-            }
-        }
 
-        let kind = match decode_transport_kind(transport_kind_val) {
+        let kind = match decode_transport_kind(options.transport_kind) {
             Ok(k) => k,
             Err(s) => return s,
         };
-        let profile = match decode_kcp_profile(kcp_profile_val) {
+        let profile = match decode_kcp_profile(options.kcp_profile) {
             Ok(p) => p,
             Err(s) => return s,
         };
-        let host = match unsafe { bytes_view_to_str(&host_view) } {
+        let host = match unsafe { bytes_view_to_str(&options.host) } {
             Ok(h) => h,
             Err(s) => return s,
         };
-        if port == 0 || host.is_empty() {
+        if options.port == 0 || host.is_empty() {
             return NB_INVALID_ARGUMENT;
         }
 
         let ctx = unsafe { &(*context).0 };
-        match ctx.connect(kind, host, port, profile) {
+        match ctx.connect(kind, host, options.port, profile) {
             Ok(id) => {
                 unsafe {
                     *out_connection = id;
@@ -263,7 +190,7 @@ unsafe extern "C" fn connection_state(
         match ctx.connection_state(connection) {
             Some(s) => {
                 unsafe {
-                    *out_state = s + 1;
+                    *out_state = abi_connection_state(s);
                 }
                 NB_OK
             }
@@ -394,59 +321,23 @@ unsafe extern "C" fn server_start(
     out_server: *mut u64,
 ) -> NbStatus {
     ffi_guard(|| {
-        if context.is_null() || options.is_null() || out_server.is_null() {
+        if context.is_null() || out_server.is_null() {
             return NB_INVALID_ARGUMENT;
         }
-        let opt_size = unsafe { std::ptr::read_unaligned(options as *const u32) };
-        if opt_size < NB_SERVER_OPTIONS_V1_MIN_SIZE {
-            return NB_INVALID_ARGUMENT;
-        }
-        let transport_kind_val =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(4) as *const u32) };
-        let bind_host_view = unsafe {
-            let p = (options as *const u8).add(8) as *const NbBytesViewV1;
-            std::ptr::read_unaligned(p)
+        let options = match unsafe { decode_server_options(options) } {
+            Ok(options) => options,
+            Err(status) => return status,
         };
-        let port =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(24) as *const u16) };
-        let reserved0 =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(26) as *const u16) };
-        if reserved0 != 0 {
-            return NB_INVALID_ARGUMENT;
-        }
-        let max_connections =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(28) as *const u32) };
-        let kcp_profile_val =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(32) as *const u32) };
-        let flags =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(36) as *const u32) };
-        if flags != 0 {
-            return NB_UNSUPPORTED;
-        }
-        let reserved1 =
-            unsafe { std::ptr::read_unaligned((options as *const u8).add(40) as *const u32) };
-        if reserved1 != 0 {
-            return NB_INVALID_ARGUMENT;
-        }
-        if opt_size >= size_of::<NbServerOptionsV1>() as u32 {
-            let reserved_slice = unsafe {
-                let p = (options as *const u8).add(48) as *const u64;
-                slice::from_raw_parts(p, 4)
-            };
-            if reserved_slice.iter().any(|&r| r != 0) {
-                return NB_INVALID_ARGUMENT;
-            }
-        }
 
-        let kind = match decode_transport_kind(transport_kind_val) {
+        let kind = match decode_transport_kind(options.transport_kind) {
             Ok(k) => k,
             Err(s) => return s,
         };
-        let profile = match decode_kcp_profile(kcp_profile_val) {
+        let profile = match decode_kcp_profile(options.kcp_profile) {
             Ok(p) => p,
             Err(s) => return s,
         };
-        let bind_str = match unsafe { bytes_view_to_str(&bind_host_view) } {
+        let bind_str = match unsafe { bytes_view_to_str(&options.bind_host) } {
             Ok(s) => s,
             Err(s) => return s,
         };
@@ -460,7 +351,13 @@ unsafe extern "C" fn server_start(
         };
 
         let ctx = unsafe { &(*context).0 };
-        match ctx.start_server(kind, port, max_connections as usize, bind, profile) {
+        match ctx.start_server(
+            kind,
+            options.port,
+            options.max_connections as usize,
+            bind,
+            profile,
+        ) {
             Ok(id) => {
                 unsafe {
                     *out_server = id;

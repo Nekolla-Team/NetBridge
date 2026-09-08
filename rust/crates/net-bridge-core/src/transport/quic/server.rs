@@ -4,9 +4,11 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::error::{BridgeError, Transport};
 use crate::socket_util;
-use crate::{ServerHandle, TransportEndpoint, try_admit};
+use crate::{ServerHandle, try_admit};
 
 /// Starts a server QUIC acceptor through NativeContext.
 pub fn start_server_in_context(
@@ -52,17 +54,16 @@ pub fn start_server_in_context(
     ));
     let commit_lock = Arc::new(std::sync::Mutex::new(()));
     let stopped_pair = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let shutdown = CancellationToken::new();
+    let accept_shutdown = shutdown.clone();
     let accept_endpoint = endpoint.clone();
     let accept_counter = Arc::clone(&conn_count);
     let accept_stopped = Arc::clone(&stopped_pair);
     ctx.servers_map().insert(
         server_id,
         Arc::new(ServerHandle {
-            endpoint: TransportEndpoint::Quic(stop_tx),
+            shutdown,
             port: actual_port,
-            max_connections,
-            conn_count,
             state,
             commit_lock,
             stopped_pair,
@@ -75,7 +76,7 @@ pub fn start_server_in_context(
         let mut incoming_set = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
-                _ = stop_rx.recv() => break,
+                _ = accept_shutdown.cancelled() => break,
                 acc = accept_endpoint.accept() => {
                     let Some(incoming) = acc else {
                         break;
@@ -144,19 +145,18 @@ async fn serve_incoming_in_context(
     };
 
     let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel = CancellationToken::new();
+    let data_plane_cancel = cancel.clone();
     let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
 
-    let handle = crate::ConnHandle::new(
+    let handle = crate::ConnHandle::server(
         state.clone(),
         to_java_rx,
         to_transport_tx.clone(),
-        cancel_tx,
-        Some(server_id),
-        Some(conn_counter.clone()),
-        true,
-        Some(peer),
+        cancel,
+        conn_counter.clone(),
+        peer,
     );
 
     // Linearized commit check with server lifecycle
@@ -168,20 +168,26 @@ async fn serve_incoming_in_context(
 
     ctx.set_conn_remote_addr(conn_id, peer);
     let accept_ctx = Arc::clone(&ctx);
-    let to_transport_tx_runner = to_transport_tx;
     ctx.spawn_connection_task("quic stream accept and drive", conn_id, async move {
-        super::connection::run_connection_with_sink(
+        let counters = accept_ctx
+            .conns()
+            .get(&conn_id)
+            .map(|handle| handle.counters())
+            .unwrap_or_default();
+        super::connection::QuicDataPlane {
             conn_id,
             conn,
-            cancel_rx,
+            cancel: data_plane_cancel,
             send,
             recv,
             to_transport_rx,
             to_java_tx,
-            to_transport_tx_runner,
             state,
-            accept_ctx,
-        )
+            ctx: accept_ctx,
+            counters,
+            empty_reads: 0,
+        }
+        .run()
         .await;
     });
 }
