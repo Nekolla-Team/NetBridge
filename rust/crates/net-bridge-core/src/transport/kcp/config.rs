@@ -73,7 +73,7 @@ pub(crate) mod tests {
     fn presets_match_adr() {
         let balanced = build_config(KcpProfile::Balanced);
         assert_eq!(balanced.mtu, 1400);
-        assert!(!balanced.stream, "Stream should disabled");
+        assert!(balanced.stream, "Stream should be enabled");
         assert_eq!((balanced.snd_wnd, balanced.rcv_wnd), (256, 256));
         assert!(
             balanced.nodelay.nodelay,

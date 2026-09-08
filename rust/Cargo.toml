@@ -12,4 +12,15 @@ lto = true
 strip = "symbols"
 
 [workspace.dependencies]
-bytes = "1"
+bytes = "1.12.1"
+dashmap = "6.2.1"
+fec = "0.2.2"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+kcp-rs = "0.2.6"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn-plaintext = "0.3.0"
+smux = "0.2.0"
+socket2 = "0.6.5"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7.19", default-features = false }

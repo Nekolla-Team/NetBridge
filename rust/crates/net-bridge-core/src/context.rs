@@ -1,23 +1,22 @@
 //! NativeContext: root of instance-level runtime ownership.
 
+mod io;
+mod shutdown;
+mod tasks;
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
 use dashmap::DashMap;
-use futures_util::FutureExt;
 use tokio::runtime::{Builder, Runtime};
 
 use crate::error::BridgeError;
 use crate::event::{EventSink, NoopEventSink};
 use crate::transport::TransportKind;
 use crate::transport::kcp::config::KcpProfile;
-use crate::{
-    Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_FAILED, ServerHandle,
-    TransportEndpoint,
-};
+use crate::{Command, ConnHandle, STATE_CLOSED, STATE_FAILED, ServerHandle};
 
 /// Production KCP listener startup window.
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -102,15 +101,15 @@ impl NativeContext {
         &self.event_sink
     }
 
-    pub fn conns(&self) -> &DashMap<u64, Arc<ConnHandle>> {
+    pub(crate) fn conns(&self) -> &DashMap<u64, Arc<ConnHandle>> {
         &self.connections
     }
 
-    pub fn servers_map(&self) -> &DashMap<u64, Arc<ServerHandle>> {
+    pub(crate) fn servers_map(&self) -> &DashMap<u64, Arc<ServerHandle>> {
         &self.servers
     }
 
-    pub fn remove_conn(&self, conn_id: u64) -> Option<Arc<ConnHandle>> {
+    pub(crate) fn remove_conn(&self, conn_id: u64) -> Option<Arc<ConnHandle>> {
         self.connections.remove(&conn_id).map(|(_, h)| {
             if let Some(count) = h.server_count.as_ref() {
                 count.fetch_sub(1, Ordering::Relaxed);
@@ -132,9 +131,8 @@ impl NativeContext {
     }
 
     /// Attempts to atomically commit an accepted connection; fails atomically if the server has stopped
-    /// or is not running.
-    ///
-    /// Important: invoke the foreign callback only after releasing all locks and DashMap guards (INV-4).
+    /// or is not running. The ACCEPTED callback runs only after all locks and registry guards are
+    /// released.
     pub(crate) fn try_commit_accept(
         &self,
         server_id: u64,
@@ -145,7 +143,6 @@ impl NativeContext {
             Some(s) => s,
             None => return false,
         };
-        // DashMap guard has been released
         let committed = {
             let _guard = server.commit_lock.lock().unwrap_or_else(|p| p.into_inner());
             if !server.is_running() {
@@ -155,7 +152,6 @@ impl NativeContext {
                 true
             }
         };
-        // commit_lock has been released
         if committed {
             self.event_sink().on_event(
                 crate::event::NB_EVENT_ACCEPTED,
@@ -169,9 +165,7 @@ impl NativeContext {
         }
     }
 
-    /// Emits a successful-connection event (CONNECTED).
-    ///
-    /// Important: release the DashMap guard before the callback (INV-4).
+    /// Emits a successful-connection event (CONNECTED) after releasing the registry guard.
     pub(crate) fn emit_connected(&self, conn_id: u64) -> bool {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -200,18 +194,15 @@ impl NativeContext {
         };
         // DashMap guard was released immediately after obtaining the Arc
         let _ = handle.emit_terminal(&*self.event_sink, conn, STATE_CLOSED, 0);
-        let to_transport = handle.to_transport.clone();
-        let _ = handle.cancel_tx.send(true);
+        let to_transport = handle.request_close();
         drop(handle);
         let _ = to_transport.try_send(Command::Close);
         self.remove_conn(conn);
         true
     }
 
-    /// Emits a non-terminal event (DATA_AVAILABLE / WRITABLE). Silently drop it if terminal state has
-    /// already been marked.
-    ///
-    /// Important: release the DashMap guard before the callback (INV-4).
+    /// Emits a non-terminal event (DATA_AVAILABLE / WRITABLE) after releasing the registry guard.
+    /// Silently drops the event if terminal state has already been marked.
     pub(crate) fn emit_non_terminal(&self, conn_id: u64, kind: u32, arg0: i64, arg1: i64) -> bool {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -221,10 +212,8 @@ impl NativeContext {
         }
     }
 
-    /// Emit the terminal event (FAILED/CLOSED) exactly once; keep the entry as a tombstone until Java
-    /// releases it.
-    ///
-    /// Important: release the DashMap guard before the callback (INV-4).
+    /// Emits the terminal event (FAILED/CLOSED) exactly once and keeps the entry as a tombstone until
+    /// Java releases it. The callback runs after the registry guard is released.
     pub(crate) fn emit_terminal_with_reason(&self, conn_id: u64, reason_code: i64) {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -237,9 +226,8 @@ impl NativeContext {
         self.emit_terminal_with_reason(conn_id, 0);
     }
 
-    /// Commit terminal state while retaining the tombstone, plus emit the terminal event exactly once.
-    ///
-    /// Important: release the DashMap guard before the callback (INV-4).
+    /// Commits terminal state while retaining the tombstone and emits the terminal event exactly once.
+    /// The callback runs after the registry guard is released.
     pub(crate) fn fail_connection_with_reason(&self, conn_id: u64, reason_code: i64) {
         let handle = self.connections.get(&conn_id).map(|h| Arc::clone(&*h));
         if let Some(handle) = handle {
@@ -255,212 +243,6 @@ impl NativeContext {
     pub(crate) fn set_conn_remote_addr(&self, conn_id: u64, addr: SocketAddr) {
         if let Some(handle) = self.connections.get(&conn_id) {
             *handle.remote_addr.write().unwrap() = Some(addr);
-        }
-    }
-
-    /// panic-in-poll protection: actually catch panics during future polling with a single-layer task
-    /// and no nested spawn. Register before execution so a task cannot exit/remove itself until registry
-    /// insertion completes, preventing stale-handle races. An RAII guard ensures the task is removed
-    /// from conn_tasks whether it exits normally, panics, or is aborted.
-    pub(crate) fn spawn_connection_task<F>(
-        self: &Arc<Self>,
-        what: &'static str,
-        conn_id: u64,
-        fut: F,
-    ) where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let ctx = Arc::clone(self);
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
-        let join_handle = self.handle.spawn(async move {
-            struct ConnTaskGuard {
-                ctx: Arc<NativeContext>,
-                id: u64,
-            }
-            impl Drop for ConnTaskGuard {
-                fn drop(&mut self) {
-                    self.ctx.conn_tasks.remove(&self.id);
-                }
-            }
-            let _guard = ConnTaskGuard {
-                ctx: Arc::clone(&ctx),
-                id: conn_id,
-            };
-            let _ = start_rx.await;
-            let res = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
-            if let Err(payload) = res {
-                crate::report_error(format!(
-                    "{what} panicked: {}",
-                    crate::describe_panic(&payload)
-                ));
-                ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_INTERNAL);
-            }
-        });
-        self.conn_tasks.insert(conn_id, join_handle);
-        let _ = start_tx.send(());
-    }
-
-    /// A server-task panic transitions state to FAILED and emits a SERVER_STATE event. Single-layer task
-    /// with no nested spawn; registration precedes execution, and an RAII guard guarantees cleanup.
-    pub(crate) fn spawn_server_task<F>(self: &Arc<Self>, what: &'static str, server_id: u64, fut: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let ctx = Arc::clone(self);
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
-        let join_handle = self.handle.spawn(async move {
-            struct ServerTaskGuard {
-                ctx: Arc<NativeContext>,
-                id: u64,
-            }
-            impl Drop for ServerTaskGuard {
-                fn drop(&mut self) {
-                    self.ctx.server_tasks.remove(&self.id);
-                }
-            }
-            let _guard = ServerTaskGuard {
-                ctx: Arc::clone(&ctx),
-                id: server_id,
-            };
-            let _ = start_rx.await;
-            let res = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
-            if let Err(payload) = res {
-                crate::report_error(format!(
-                    "{what} panicked: {}",
-                    crate::describe_panic(&payload)
-                ));
-                if let Some(server) = ctx.servers.get(&server_id) {
-                    server
-                        .state
-                        .store(crate::SERVER_STATE_FAILED, Ordering::SeqCst);
-                }
-                ctx.emit_server_state(server_id, crate::SERVER_STATE_FAILED);
-                ctx.servers.remove(&server_id);
-            }
-        });
-        self.server_tasks.insert(server_id, join_handle);
-        let _ = start_tx.send(());
-    }
-
-    pub fn write_chunk(&self, conn: u64, data: Bytes) -> Result<usize, BridgeError> {
-        if data.is_empty() {
-            return Ok(0);
-        }
-        let len = data.len();
-        if len > crate::MAX_IO_CHUNK {
-            return Err(BridgeError::InvalidArgument(
-                "chunk size exceeds MAX_IO_CHUNK",
-            ));
-        }
-        let Some(handle) = self.connections.get(&conn) else {
-            return Err(BridgeError::NoSuchConnection);
-        };
-        let writable = handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
-        let write_blocked = Arc::clone(&handle.write_blocked);
-        let outbound_bytes = Arc::clone(&handle.outbound_bytes);
-        let to_transport = handle.to_transport.clone();
-        drop(handle);
-        if !writable {
-            return Ok(0);
-        }
-
-        // Reserve byte budget atomically
-        let mut curr_bytes = outbound_bytes.load(Ordering::SeqCst);
-        loop {
-            if curr_bytes.saturating_add(len) > crate::DEFAULT_MAX_BUFFERED_BYTES {
-                write_blocked.store(true, Ordering::SeqCst);
-                // Double check to prevent lost-wakeup race
-                if outbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES
-                    && write_blocked.swap(false, Ordering::SeqCst)
-                {
-                    self.emit_non_terminal(conn, crate::event::NB_EVENT_WRITABLE, 0, 0);
-                }
-                return Ok(0);
-            }
-            match outbound_bytes.compare_exchange_weak(
-                curr_bytes,
-                curr_bytes + len,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(actual) => curr_bytes = actual,
-            }
-        }
-
-        match to_transport.try_send(Command::Write(data)) {
-            Ok(()) => Ok(len),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Rollback byte budget
-                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
-                write_blocked.store(true, Ordering::SeqCst);
-                // Double check to prevent lost-wakeup race if consumer drained just before store
-                if to_transport.capacity() > 0 && write_blocked.swap(false, Ordering::SeqCst) {
-                    self.emit_non_terminal(conn, crate::event::NB_EVENT_WRITABLE, 0, 0);
-                }
-                Ok(0)
-            }
-            Err(_) => {
-                // Rollback byte budget
-                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
-                Err(BridgeError::ConnectionClosed)
-            }
-        }
-    }
-
-    pub fn read_chunk(&self, conn: u64, max_bytes: usize) -> Result<Bytes, BridgeError> {
-        let Some(handle) = self.connections.get(&conn) else {
-            return Err(BridgeError::NoSuchConnection);
-        };
-        let to_java = handle.to_java.clone();
-        let inbound_bytes = Arc::clone(&handle.inbound_bytes);
-        let read_waker = Arc::clone(&handle.read_waker);
-        drop(handle);
-        let mut guard = to_java
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (rx, pending) = &mut *guard;
-
-        let first = match pending.pop_front().or_else(|| rx.try_recv().ok()) {
-            Some(b) => b,
-            None => return Ok(Bytes::new()),
-        };
-        if first.len() > max_bytes {
-            pending.push_front(first.slice(max_bytes..));
-            inbound_bytes.fetch_sub(max_bytes, Ordering::SeqCst);
-            read_waker.notify_one();
-            return Ok(first.slice(..max_bytes));
-        }
-
-        match pending.pop_front().or_else(|| rx.try_recv().ok()) {
-            None => {
-                inbound_bytes.fetch_sub(first.len(), Ordering::SeqCst);
-                read_waker.notify_one();
-                Ok(first)
-            }
-            Some(second) => {
-                let mut out = bytes::BytesMut::with_capacity(max_bytes);
-                out.extend_from_slice(&first);
-                let mut next = Some(second);
-                while out.len() < max_bytes {
-                    let Some(mut chunk) = next
-                        .take()
-                        .or_else(|| pending.pop_front().or_else(|| rx.try_recv().ok()))
-                    else {
-                        break;
-                    };
-                    if out.len() + chunk.len() > max_bytes {
-                        let cut = max_bytes - out.len();
-                        pending.push_front(chunk.slice(cut..));
-                        chunk = chunk.slice(..cut);
-                    }
-                    out.extend_from_slice(&chunk);
-                }
-                let total_consumed = out.len();
-                inbound_bytes.fetch_sub(total_consumed, Ordering::SeqCst);
-                read_waker.notify_one();
-                Ok(out.freeze())
-            }
         }
     }
 
@@ -482,7 +264,7 @@ impl NativeContext {
             None => return Err(BridgeError::NoSuchConnection),
         };
         // DashMap guard was released after obtaining the Arc
-        let endpoint_stop = {
+        let shutdown = {
             let _guard = handle.commit_lock.lock().unwrap_or_else(|p| p.into_inner());
             let curr = handle.state.load(Ordering::SeqCst);
             if curr == crate::SERVER_STATE_STOPPED {
@@ -491,20 +273,10 @@ impl NativeContext {
             handle
                 .state
                 .store(crate::SERVER_STATE_STOPPED, Ordering::SeqCst);
-            match &handle.endpoint {
-                TransportEndpoint::Quic(stop_tx) => TransportEndpoint::Quic(stop_tx.clone()),
-                TransportEndpoint::Kcp(stop_tx) => TransportEndpoint::Kcp(stop_tx.clone()),
-            }
+            handle.shutdown.clone()
         };
         // commit_lock has been released
-        match &endpoint_stop {
-            TransportEndpoint::Quic(stop_tx) => {
-                let _ = stop_tx.try_send(());
-            }
-            TransportEndpoint::Kcp(stop_tx) => {
-                let _ = stop_tx.try_send(());
-            }
-        }
+        shutdown.cancel();
         let (lock, cvar) = &*handle.stopped_pair;
         let mut guard = lock.lock().unwrap_or_else(|p| p.into_inner());
         let start = std::time::Instant::now();
@@ -568,106 +340,16 @@ impl NativeContext {
             ),
         }
     }
-
-    pub fn shutdown(&self, timeout: Duration) -> Result<(), BridgeError> {
-        let deadline = std::time::Instant::now() + timeout;
-        if self
-            .state
-            .compare_exchange(
-                CONTEXT_STATE_RUNNING,
-                CONTEXT_STATE_SHUTTING_DOWN,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_err()
-            && self.state() != CONTEXT_STATE_SHUTTING_DOWN
-            && self.state() == CONTEXT_STATE_CLOSED
-        {
-            return Ok(());
-        }
-
-        let mut shutdown_err: Option<BridgeError> = None;
-
-        // Stop all servers
-        let server_ids: Vec<u64> = self.servers.iter().map(|e| *e.key()).collect();
-        for s_id in server_ids {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if let Err(e) = self.stop_server_with_timeout(s_id, remaining)
-                && shutdown_err.is_none()
-            {
-                shutdown_err = Some(e);
-            }
-        }
-
-        // Close all active connections
-        let conn_ids: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
-        for c_id in conn_ids {
-            self.close_connection(c_id);
-        }
-
-        // Wait for all connections and tasks to actually join and exit
-        while !self.conn_tasks.is_empty() || !self.server_tasks.is_empty() {
-            if std::time::Instant::now() >= deadline {
-                if shutdown_err.is_none() {
-                    shutdown_err = Some(BridgeError::Timeout);
-                }
-                break;
-            }
-            for entry in self.conn_tasks.iter() {
-                entry.value().abort();
-            }
-            for entry in self.server_tasks.iter() {
-                entry.value().abort();
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        if let Some(err) = shutdown_err {
-            return Err(err);
-        }
-
-        // Ensure all registries are empty
-        let remaining_conns: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
-        for c_id in remaining_conns {
-            self.remove_conn(c_id);
-        }
-        self.conn_tasks.clear();
-        self.server_tasks.clear();
-
-        // Shut down the Tokio runtime
-        if let Ok(mut guard) = self.runtime.lock()
-            && let Some(rt) = guard.take()
-        {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            rt.shutdown_timeout(remaining);
-        }
-
-        self.state.store(CONTEXT_STATE_CLOSED, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-impl Drop for NativeContext {
-    fn drop(&mut self) {
-        if let Ok(mut rt_opt) = self.runtime.lock()
-            && let Some(rt) = rt_opt.take()
-        {
-            if tokio::runtime::Handle::try_current().is_ok() {
-                std::thread::spawn(move || {
-                    drop(rt);
-                });
-            } else {
-                drop(rt);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::STATE_CONNECTED;
+    use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
     use std::time::Instant;
+    use tokio_util::sync::CancellationToken;
 
     struct TestEventSink {
         event_count: AtomicUsize,
@@ -864,7 +546,7 @@ mod tests {
         let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
         ctx.conns().insert(
             7,
-            Arc::new(ConnHandle::new(
+            Arc::new(ConnHandle::client(
                 state.clone(),
                 {
                     let (_tx, rx) = tokio::sync::mpsc::channel(1);
@@ -874,12 +556,7 @@ mod tests {
                     let (tx, _rx) = tokio::sync::mpsc::channel(1);
                     tx
                 },
-                {
-                    let (tx, _rx) = tokio::sync::watch::channel(false);
-                    tx
-                },
-                None,
-                None,
+                CancellationToken::new(),
                 false,
                 None,
             )),
@@ -926,17 +603,13 @@ mod tests {
         let (ctx, sink) = recording_ctx();
         let (to_transport_tx, mut to_transport_rx) = tokio::sync::mpsc::channel::<Command>(4096);
         let (_to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Bytes>(8192);
-        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
-
         ctx.conns().insert(
             42,
-            Arc::new(ConnHandle::new(
+            Arc::new(ConnHandle::client(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
                 to_java_rx,
                 to_transport_tx,
-                cancel_tx,
-                None,
-                None,
+                CancellationToken::new(),
                 false,
                 None,
             )),
@@ -1042,17 +715,14 @@ mod tests {
         let (ctx, sink) = recording_ctx();
         let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
         let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 999;
         ctx.conns().insert(
             conn_id,
-            Arc::new(ConnHandle::new(
+            Arc::new(ConnHandle::client(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
                 to_java_rx,
                 to_transport_tx,
-                cancel_tx,
-                None,
-                None,
+                CancellationToken::new(),
                 false,
                 None,
             )),
@@ -1093,7 +763,6 @@ mod tests {
     #[test]
     fn server_stop_linearization_rejects_late_accept() {
         let (ctx, sink) = recording_ctx();
-        let (stop_tx, _) = tokio::sync::mpsc::channel(1);
         let server_id = 100;
         let conn_count = Arc::new(AtomicUsize::new(1));
         let state = Arc::new(AtomicU8::new(crate::SERVER_STATE_RUNNING));
@@ -1103,10 +772,8 @@ mod tests {
         ctx.servers_map().insert(
             server_id,
             Arc::new(ServerHandle {
-                endpoint: TransportEndpoint::Quic(stop_tx),
+                shutdown: CancellationToken::new(),
                 port: 12345,
-                max_connections: 16,
-                conn_count: Arc::clone(&conn_count),
                 state: Arc::clone(&state),
                 commit_lock: Arc::clone(&commit_lock),
                 stopped_pair,
@@ -1119,16 +786,13 @@ mod tests {
         // Now an accept attempt comes in after stop linearization:
         let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
         let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
-        let handle = ConnHandle::new(
+        let handle = ConnHandle::server(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            Some(server_id),
-            Some(conn_count),
-            false,
-            None,
+            CancellationToken::new(),
+            conn_count,
+            "127.0.0.1:1".parse().expect("remote address"),
         );
 
         let accepted = ctx.try_commit_accept(server_id, 200, Arc::new(handle));
@@ -1157,7 +821,8 @@ mod tests {
         let (ctx, _) = recording_ctx();
         let (to_transport_tx, _to_transport_rx) = tokio::sync::mpsc::channel(1);
         let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let cancel = CancellationToken::new();
+        let cancel_probe = cancel.clone();
         let conn_id = 777;
 
         // Fill the 1-capacity command channel
@@ -1165,13 +830,11 @@ mod tests {
 
         ctx.conns().insert(
             conn_id,
-            Arc::new(ConnHandle::new(
+            Arc::new(ConnHandle::client(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
                 to_java_rx,
                 to_transport_tx,
-                cancel_tx,
-                None,
-                None,
+                cancel,
                 false,
                 None,
             )),
@@ -1179,7 +842,10 @@ mod tests {
 
         // Closing a connection with a saturated command queue must succeed immediately out-of-band
         assert!(ctx.close_connection(conn_id));
-        assert!(*cancel_rx.borrow(), "Cancellation signal must be delivered");
+        assert!(
+            cancel_probe.is_cancelled(),
+            "Cancellation signal must be delivered"
+        );
         assert!(
             !ctx.conns().contains_key(&conn_id),
             "Registry entry must be removed"
@@ -1191,15 +857,12 @@ mod tests {
         let (ctx, _) = recording_ctx();
         let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
         let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 888;
-        let handle = ConnHandle::new(
+        let handle = ConnHandle::client(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            None,
-            None,
+            CancellationToken::new(),
             false,
             None,
         );
@@ -1259,15 +922,12 @@ mod tests {
 
         let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
         let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 999;
-        let handle = ConnHandle::new(
+        let handle = ConnHandle::client(
             Arc::new(AtomicU32::new(crate::STATE_CONNECTING)),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            None,
-            None,
+            CancellationToken::new(),
             false,
             None,
         );
@@ -1296,8 +956,7 @@ mod tests {
                 && !self.stopped_in_callback.swap(true, Ordering::SeqCst)
                 && let Some(ctx) = self.ctx.read().unwrap().as_ref()
             {
-                // Synchronously call stop_server on ACCEPTED to verify there is no deadlock
-                // (INV-4, P0-RUST-01, P0-RUST-02)
+                // Synchronously call stop_server on ACCEPTED to verify there is no deadlock.
                 assert!(ctx.stop_server(object_id).is_ok());
             }
         }
@@ -1317,15 +976,11 @@ mod tests {
         let state = Arc::new(AtomicU8::new(crate::SERVER_STATE_RUNNING));
         let commit_lock = Arc::new(Mutex::new(()));
         let stopped_pair = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
-        let (stop_tx, _) = tokio::sync::mpsc::channel(1);
-
         ctx.servers_map().insert(
             server_id,
             Arc::new(ServerHandle {
-                endpoint: TransportEndpoint::Quic(stop_tx),
+                shutdown: CancellationToken::new(),
                 port: 23456,
-                max_connections: 16,
-                conn_count: Arc::clone(&conn_count),
                 state: Arc::clone(&state),
                 commit_lock,
                 stopped_pair,
@@ -1334,16 +989,13 @@ mod tests {
 
         let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
         let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
-        let handle = ConnHandle::new(
+        let handle = ConnHandle::server(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            Some(server_id),
-            Some(conn_count),
-            false,
-            None,
+            CancellationToken::new(),
+            conn_count,
+            "127.0.0.1:1".parse().expect("remote address"),
         );
 
         let accepted = ctx.try_commit_accept(server_id, 1001, Arc::new(handle));

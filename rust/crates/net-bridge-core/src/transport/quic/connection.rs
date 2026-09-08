@@ -1,135 +1,159 @@
-//! Single-connection QUIC data plane: read/write loops and close propagation.
+//! Single-connection QUIC data plane.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
+use quinn::{Connection, ReadError, RecvStream, SendStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::connection::ConnectionCounters;
 use crate::context::NativeContext;
-use crate::event::NB_EVENT_DATA_AVAILABLE;
-use crate::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
+use crate::event::{NB_EVENT_DATA_AVAILABLE, NB_EVENT_WRITABLE, NB_REASON_PROTOCOL};
+use crate::{Command, DEFAULT_MAX_BUFFERED_BYTES, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
 
-/// Single-connection read/write loop: the read side pushes into the Java queue, and the write side
-/// consumes Java commands. Terminal events are emitted exactly once through `ctx.emit_terminal`; the
-/// entry remains a tombstone until Java releases it.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_connection_with_sink(
-    conn_id: u64,
-    conn: quinn::Connection,
-    cts: CancellationToken,
-    mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
-    mut to_transport_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Bytes>,
-    _to_transport_tx: mpsc::Sender<Command>,
-    state: Arc<AtomicU32>,
-    ctx: Arc<NativeContext>,
-) {
-    let (write_blocked, outbound_bytes, inbound_bytes, read_waker) = ctx
-        .conns()
-        .get(&conn_id)
-        .map(|h| {
-            (
-                h.write_blocked.clone(),
-                h.outbound_bytes.clone(),
-                h.inbound_bytes.clone(),
-                h.read_waker.clone(),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                Arc::new(tokio::sync::Notify::new()),
-            )
-        });
+const READ_CHUNK_SIZE: usize = 64 * 1024;
+const MAX_EMPTY_READS: u32 = 16;
 
-    let mut empty_streak = 0u32;
-    loop {
-        if state.load(Ordering::SeqCst) == STATE_CLOSED || cts.is_cancelled() {
-            let _ = send.finish();
-            break;
-        }
-        let can_read = inbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES;
-        tokio::select! {
-            biased;
-            _ = cts.cancelled() => {
+/// Owns the bidirectional QUIC data plane for one connection.
+pub(crate) struct QuicDataPlane {
+    pub(crate) conn_id: u64,
+    pub(crate) conn: Connection,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) send: SendStream,
+    pub(crate) recv: RecvStream,
+    pub(crate) to_transport_rx: mpsc::Receiver<Command>,
+    pub(crate) to_java_tx: mpsc::Sender<Bytes>,
+    pub(crate) state: Arc<AtomicU32>,
+    pub(crate) ctx: Arc<NativeContext>,
+    pub(crate) counters: ConnectionCounters,
+    pub(crate) empty_reads: u32,
+}
+
+impl QuicDataPlane {
+    /// Runs until either peer closes, cancellation fires, or a protocol error occurs.
+    pub(crate) async fn run(mut self) {
+        loop {
+            if self.should_stop() {
+                self.finish_send();
                 break;
             }
-            res = recv.read_chunk(65536, true), if can_read => {
-                match res {
-                    Ok(Some(chunk)) => {
-                        if chunk.bytes.is_empty() {
-                            empty_streak = empty_streak.saturating_add(1);
-                            if empty_streak >= 16 {
-                                break;
-                            }
-                            continue;
-                        }
-                        empty_streak = 0;
-                        let chunk_len = chunk.bytes.len();
-                        inbound_bytes.fetch_add(chunk_len, Ordering::SeqCst);
-                        if to_java_tx.send(chunk.bytes).await.is_err() {
-                            inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
-                            break;
-                        }
-                        ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        match &e {
-                            quinn::ReadError::ClosedStream
-                            | quinn::ReadError::ConnectionLost(quinn::ConnectionError::ApplicationClosed(_))
-                            | quinn::ReadError::ConnectionLost(quinn::ConnectionError::LocallyClosed) => {
-                                // Remote graceful close / application close / local close
-                                break;
-                            }
-                            _ => {
-                                if state.load(Ordering::SeqCst) != STATE_CLOSED {
-                                    crate::report_error(format!("quic conn {conn_id}: read error: {e}"));
-                                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
+            if !self.step().await {
+                break;
             }
-            _ = read_waker.notified(), if !can_read => {
-                // Java consumed inbound data; wake the reader to recheck can_read
+        }
+        self.finish();
+    }
+
+    fn should_stop(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == STATE_CLOSED || self.cancel.is_cancelled()
+    }
+
+    async fn step(&mut self) -> bool {
+        let can_read =
+            self.counters.inbound_bytes.load(Ordering::SeqCst) < DEFAULT_MAX_BUFFERED_BYTES;
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => false,
+            result = self.recv.read_chunk(READ_CHUNK_SIZE, true), if can_read => {
+                self.on_read(result).await
             }
-            cmd = to_transport_rx.recv() => match cmd {
-                Some(Command::Write(bytes)) => {
-                    let bytes_len = bytes.len();
-                    if send.write_all(&bytes).await.is_err() {
-                        outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                        ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
-                        break;
-                    }
-                    outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                    if write_blocked.swap(false, Ordering::SeqCst) {
-                        ctx.emit_non_terminal(conn_id, crate::event::NB_EVENT_WRITABLE, 0, 0);
-                    }
-                }
-                Some(Command::Close) => {
-                    let _ = send.finish();
-                    break;
-                }
-                None => break,
-            },
-            _ = conn.closed() => break,
+            _ = self.counters.read_waker.notified(), if !can_read => true,
+            command = self.to_transport_rx.recv() => self.on_command(command).await,
+            _ = self.conn.closed() => false,
         }
     }
 
-    match state.load(Ordering::SeqCst) {
-        STATE_CONNECTING | STATE_CONNECTED => {
-            state.store(STATE_CLOSED, Ordering::SeqCst);
-            ctx.emit_terminal(conn_id);
+    async fn on_read(&mut self, result: Result<Option<quinn::Chunk>, ReadError>) -> bool {
+        match result {
+            Ok(Some(chunk)) if chunk.bytes.is_empty() => self.on_empty_read(),
+            Ok(Some(chunk)) => self.on_chunk(chunk.bytes).await,
+            Ok(None) => false,
+            Err(error) => self.on_read_error(error),
         }
-        _ => {}
     }
-    conn.close(0u32.into(), b"net-bridge close");
+
+    fn on_empty_read(&mut self) -> bool {
+        self.empty_reads = self.empty_reads.saturating_add(1);
+        self.empty_reads < MAX_EMPTY_READS
+    }
+
+    async fn on_chunk(&mut self, bytes: Bytes) -> bool {
+        self.empty_reads = 0;
+        let len = bytes.len();
+        self.counters.inbound_bytes.fetch_add(len, Ordering::SeqCst);
+        if self.to_java_tx.send(bytes).await.is_err() {
+            self.counters.inbound_bytes.fetch_sub(len, Ordering::SeqCst);
+            return false;
+        }
+        self.ctx
+            .emit_non_terminal(self.conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
+        true
+    }
+
+    fn on_read_error(&mut self, error: ReadError) -> bool {
+        if is_graceful_read_close(&error) {
+            return false;
+        }
+        if self.state.load(Ordering::SeqCst) != STATE_CLOSED {
+            crate::report_error(format!("quic conn {}: read error: {error}", self.conn_id));
+            self.ctx
+                .fail_connection_with_reason(self.conn_id, NB_REASON_PROTOCOL);
+        }
+        false
+    }
+
+    async fn on_command(&mut self, command: Option<Command>) -> bool {
+        match command {
+            Some(Command::Write(bytes)) => self.write(bytes).await,
+            Some(Command::Close) => {
+                self.finish_send();
+                false
+            }
+            None => false,
+        }
+    }
+
+    async fn write(&mut self, bytes: Bytes) -> bool {
+        let len = bytes.len();
+        let result = self.send.write_all(&bytes).await;
+        self.counters
+            .outbound_bytes
+            .fetch_sub(len, Ordering::SeqCst);
+        if result.is_err() {
+            self.ctx
+                .fail_connection_with_reason(self.conn_id, NB_REASON_PROTOCOL);
+            return false;
+        }
+        if self.counters.write_blocked.swap(false, Ordering::SeqCst) {
+            self.ctx
+                .emit_non_terminal(self.conn_id, NB_EVENT_WRITABLE, 0, 0);
+        }
+        true
+    }
+
+    fn finish_send(&mut self) {
+        let _ = self.send.finish();
+    }
+
+    fn finish(self) {
+        if matches!(
+            self.state.load(Ordering::SeqCst),
+            STATE_CONNECTING | STATE_CONNECTED
+        ) {
+            self.state.store(STATE_CLOSED, Ordering::SeqCst);
+            self.ctx.emit_terminal(self.conn_id);
+        }
+        self.conn.close(0u32.into(), b"net-bridge close");
+    }
+}
+
+fn is_graceful_read_close(error: &ReadError) -> bool {
+    matches!(
+        error,
+        ReadError::ClosedStream
+            | ReadError::ConnectionLost(quinn::ConnectionError::ApplicationClosed(_))
+            | ReadError::ConnectionLost(quinn::ConnectionError::LocallyClosed)
+    )
 }

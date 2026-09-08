@@ -9,6 +9,7 @@ use bytes::Bytes;
 use kcp::{KcpStream, KcpUdpStream};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::config::{KcpProfile, build_config};
 use super::fec_stream::FecStream;
@@ -27,19 +28,18 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel = CancellationToken::new();
+    let data_plane_cancel = cancel.clone();
     let Ok(conn_id) = ctx.allocate_id() else {
         return Err(BridgeError::IdOverflow);
     };
     ctx.conns().insert(
         conn_id,
-        Arc::new(ConnHandle::new(
+        Arc::new(ConnHandle::client(
             state.clone(),
             to_java_rx,
             to_transport_tx,
-            cancel_tx,
-            None,
-            None,
+            cancel,
             true,
             None,
         )),
@@ -58,31 +58,34 @@ pub fn connect_in_context(
             return;
         };
         ctx_task.set_conn_remote_addr(conn_id, addr);
-        let Some((mc_stream, session)) = super::connection::prepare_kcp_data_plane(
-            conn_id,
-            FecStream::new(stream),
-            true,
-            &state,
-            &ctx_task,
-        )
-        .await
-        else {
-            return;
-        };
+        let (mc_stream, session) =
+            match super::connection::prepare_kcp_data_plane(FecStream::new(stream), true).await {
+                Ok(data_plane) => data_plane,
+                Err(error) => {
+                    fail(&ctx_task, conn_id, &state, error);
+                    return;
+                }
+            };
         if state.load(Ordering::SeqCst) != crate::STATE_CLOSED {
             ctx_task.emit_connected(conn_id);
         }
-        super::connection::run_kcp_connection_with_sink(
+        let counters = ctx_task
+            .conns()
+            .get(&conn_id)
+            .map(|handle| handle.counters())
+            .unwrap_or_default();
+        super::connection::KcpDataPlane {
             conn_id,
-            mc_stream,
+            stream: mc_stream,
             session,
-            cancel_rx,
+            cancel: data_plane_cancel,
             to_transport_rx,
             to_java_tx,
             state,
-            true,
-            Arc::clone(&ctx_task),
-        )
+            ctx: Arc::clone(&ctx_task),
+            counters,
+        }
+        .run()
         .await;
     });
     Ok(conn_id)
