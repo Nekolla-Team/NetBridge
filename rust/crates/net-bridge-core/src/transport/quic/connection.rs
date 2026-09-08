@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::context::NativeContext;
 use crate::event::NB_EVENT_DATA_AVAILABLE;
@@ -16,7 +17,7 @@ use crate::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
 pub async fn run_connection_with_sink(
     conn_id: u64,
     conn: quinn::Connection,
-    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    cts: CancellationToken,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     mut to_transport_rx: mpsc::Receiver<Command>,
@@ -47,14 +48,14 @@ pub async fn run_connection_with_sink(
 
     let mut empty_streak = 0u32;
     loop {
-        if state.load(Ordering::SeqCst) == STATE_CLOSED || *cancel_rx.borrow() {
+        if state.load(Ordering::SeqCst) == STATE_CLOSED || cts.is_cancelled() {
             let _ = send.finish();
             break;
         }
         let can_read = inbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES;
         tokio::select! {
             biased;
-            _ = cancel_rx.changed() => {
+            _ = cts.cancelled() => {
                 break;
             }
             res = recv.read_chunk(65536, true), if can_read => {

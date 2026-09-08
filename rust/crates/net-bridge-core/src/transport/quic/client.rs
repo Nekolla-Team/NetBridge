@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
@@ -21,7 +22,7 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel_token = CancellationToken::new();
     let conn_id = ctx.allocate_id()?;
     ctx.conns().insert(
         conn_id,
@@ -29,7 +30,7 @@ pub fn connect_in_context(
             state.clone(),
             to_java_rx,
             to_transport_tx.clone(),
-            cancel_tx,
+            cancel_token,
             None,
             None,
             true,
@@ -46,7 +47,7 @@ pub fn connect_in_context(
             super::connection::run_connection_with_sink(
                 conn_id,
                 conn,
-                cancel_rx,
+                cancel_token.child_token(),
                 send,
                 recv,
                 to_transport_rx,

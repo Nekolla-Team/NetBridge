@@ -11,3 +11,5 @@ opt-level = 3
 lto = true
 strip = "symbols"
 
+[workspace.dependencies]
+bytes = "1"

@@ -2,7 +2,7 @@
 name = "net-bridge-native"
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0"
+license = "LGPL-3.0"
 
 [lib]
 name = "net_bridge_native"
@@ -11,4 +11,4 @@ path = "src/lib.rs"
 
 [dependencies]
 net-bridge-core = { path = "../net-bridge-core" }
-bytes = "1"
+bytes = { workspace = true }

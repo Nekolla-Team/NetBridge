@@ -46,7 +46,7 @@ pub fn build_config(profile: KcpProfile) -> KcpConfig {
         nodelay: profile.no_delay(),
         snd_wnd: 256,
         rcv_wnd: 256,
-        stream: false,
+        stream: true,
         connect_timeout: Duration::from_secs(8),
         ..KcpConfig::default()
     }

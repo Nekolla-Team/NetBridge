@@ -2,18 +2,26 @@
 name = "net-bridge-core"
 version = "0.1.0"
 edition = "2024"
-license = "AGPL-3.0"
+license = "LGPL-3.0"
 
 [dependencies]
+# Runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7.19"
+futures-util = "0.3"
+
+# Error handling
 thiserror = "2"
-dashmap = "6"
+
+# Transport
 socket2 = "0.6"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-proto = "0.11"
 quinn-plaintext = "0.3"
-bytes = "1"
-fec = "0.2.2"
 kcp-rs = "0.2.6"
+fec = "0.2.2"
 smux = "0.2"
-futures-util = "0.3"
+
+# Record
+dashmap = "6"
+bytes = { workspace = true }

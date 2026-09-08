@@ -13,6 +13,7 @@ mod tests;
 pub use context::NativeContext;
 pub use error::BridgeError;
 pub use event::{EventSink, NoopEventSink};
+use tokio_util::sync::CancellationToken;
 pub use transport::TransportKind;
 
 use std::any::Any;
@@ -54,7 +55,7 @@ pub struct ConnHandle {
     /// Arc 化：读路径克隆后即可释放 DashMap guard。
     pub to_java: Arc<Mutex<(mpsc::Receiver<Bytes>, VecDeque<Bytes>)>>,
     pub to_transport: mpsc::Sender<Command>,
-    pub cancel_tx: tokio::sync::watch::Sender<bool>,
+    pub cts: CancellationToken,
     /// 入站容量释放通知，唤醒读数据面。
     pub read_waker: Arc<tokio::sync::Notify>,
     pub server_id: Option<u64>,
@@ -84,7 +85,7 @@ impl ConnHandle {
         state: Arc<AtomicU32>,
         to_java_rx: mpsc::Receiver<Bytes>,
         to_transport: mpsc::Sender<Command>,
-        cancel_tx: tokio::sync::watch::Sender<bool>,
+        cts: CancellationToken,
         server_id: Option<u64>,
         server_count: Option<Arc<AtomicUsize>>,
         early_write: bool,
@@ -94,7 +95,7 @@ impl ConnHandle {
             state,
             to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
             to_transport,
-            cancel_tx,
+            cts,
             read_waker: Arc::new(tokio::sync::Notify::new()),
             server_id,
             server_count,
