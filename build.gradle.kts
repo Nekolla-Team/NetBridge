@@ -16,13 +16,13 @@ allprojects {
 }
 
 val nativeProfileProperty = providers
-        .gradleProperty("nativeProfile")
-        .orElse("debug")
+    .gradleProperty("nativeProfile")
+    .orElse("debug")
 
 val skipNativeBuildProperty = providers
-        .gradleProperty("skipNativeBuild")
-        .map { true }
-        .orElse(false)
+    .gradleProperty("skipNativeBuild")
+    .map { true }
+    .orElse(false)
 
 tasks.register<BuildNativeLibrary>("buildCdylib") {
     group = "build"
@@ -70,44 +70,44 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
     onlyIf {
         val dir = nativeDir.get().asFile
         dir.listFiles { file: File -> file.isDirectory }
-                ?.any { platform ->
-                    platform.listFiles { file: File ->
-                        file.isFile &&
-                                (
-                                        file.name.startsWith("libnet_bridge_native") ||
-                                                file.name == "net_bridge_native.dll"
-                                        )
-                    }?.isNotEmpty() == true
-                }
+            ?.any { platform ->
+                platform.listFiles { file: File ->
+                    file.isFile &&
+                            (
+                                    file.name.startsWith("libnet_bridge_native") ||
+                                            file.name == "net_bridge_native.dll"
+                                    )
+                }?.isNotEmpty() == true
+            }
             ?: false
     }
 
     doLast {
         val dir = nativeDir.get().asFile
         val header = rootDir
-                .resolve("rust/crates/net-bridge-native/include/netbridge.h")
-                .readText()
+            .resolve("rust/crates/net-bridge-native/include/netbridge.h")
+            .readText()
 
         val abiMajor = Regex("#define\\s+NB_ABI_MAJOR\\s+(\\d+)")
-                .find(header)
-                ?.groupValues
-                ?.get(1)
+            .find(header)
+            ?.groupValues
+            ?.get(1)
             ?: throw GradleException("NB_ABI_MAJOR not found in netbridge.h")
 
         val abiMinor = Regex("#define\\s+NB_ABI_MINOR\\s+(\\d+)")
-                .find(header)
-                ?.groupValues
-                ?.get(1)
+            .find(header)
+            ?.groupValues
+            ?.get(1)
             ?: throw GradleException("NB_ABI_MINOR not found in netbridge.h")
 
         val cargoToml = rootDir
-                .resolve("rust/crates/net-bridge-native/Cargo.toml")
-                .readText()
+            .resolve("rust/crates/net-bridge-native/Cargo.toml")
+            .readText()
 
         val rustVersion = Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"")
-                .find(cargoToml)
-                ?.groupValues
-                ?.get(1)
+            .find(cargoToml)
+            ?.groupValues
+            ?.get(1)
             ?: throw GradleException(
                 "package version not found in net-bridge-native Cargo.toml"
             )
@@ -116,33 +116,33 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
         var written = 0
 
         dir.listFiles { file: File -> file.isDirectory }
-                ?.sortedBy { it.name }
-                ?.forEach { platform ->
-                    val lib = platform.listFiles { file: File ->
-                        file.isFile &&
-                                (
-                                        file.name.startsWith("libnet_bridge_native") ||
-                                                file.name == "net_bridge_native.dll"
-                                        )
-                    }?.firstOrNull() ?: return@forEach
+            ?.sortedBy { it.name }
+            ?.forEach { platform ->
+                val lib = platform.listFiles { file: File ->
+                    file.isFile &&
+                            (
+                                    file.name.startsWith("libnet_bridge_native") ||
+                                            file.name == "net_bridge_native.dll"
+                                    )
+                }?.firstOrNull() ?: return@forEach
 
-                    digest.reset()
+                digest.reset()
 
-                    lib.inputStream().use { input ->
-                        val buffer = ByteArray(8192)
-                        var read: Int
+                lib.inputStream().use { input ->
+                    val buffer = ByteArray(8192)
+                    var read: Int
 
-                        while (input.read(buffer).also { read = it } > 0) {
-                            digest.update(buffer, 0, read)
-                        }
+                    while (input.read(buffer).also { read = it } > 0) {
+                        digest.update(buffer, 0, read)
                     }
+                }
 
-                    val sha = digest
-                            .digest()
-                            .joinToString("") { "%02x".format(it) }
+                val sha = digest
+                    .digest()
+                    .joinToString("") { "%02x".format(it) }
 
-                    platform.resolve("manifest.json").writeText(
-                        """
+                platform.resolve("manifest.json").writeText(
+                    """
                         {
                           "artifact": "${lib.name}",
                           "sha256": "$sha",
@@ -151,10 +151,10 @@ val generateNativeManifest = tasks.register("generateNativeManifest") {
                           "rustPackageVersion": "$rustVersion"
                         }
                         """.trimIndent() + "\n"
-                    )
+                )
 
-                    written++
-                }
+                written++
+            }
 
         if (written == 0) {
             logger.warn(
@@ -182,11 +182,11 @@ val verifyNativeSymbols = tasks.register("verifyNativeSymbols") {
 
     doLast {
         val lib = layout.buildDirectory
-                .dir("native")
-                .get()
-                .asFile
-                .resolve(subdir)
-                .resolve(cdylibName)
+            .dir("native")
+            .get()
+            .asFile
+            .resolve(subdir)
+            .resolve(cdylibName)
 
         if (!lib.exists()) {
             throw GradleException("staged cdylib not found: $lib")
@@ -195,15 +195,15 @@ val verifyNativeSymbols = tasks.register("verifyNativeSymbols") {
         val exported = providers.exec {
             commandLine("nm", "-D", lib.absolutePath)
         }.standardOutput
-                .asText
-                .get()
-                .lineSequence()
-                .filter { it.contains(" T ") }
-                .map { it.substringAfterLast(' ').trim() }
-                .filter { it.isNotEmpty() }
-                .filter { !it.startsWith("_") }
-                .filter { !it.startsWith("__") }
-                .toList()
+            .asText
+            .get()
+            .lineSequence()
+            .filter { it.contains(" T ") }
+            .map { it.substringAfterLast(' ').trim() }
+            .filter { it.isNotEmpty() }
+            .filter { !it.startsWith("_") }
+            .filter { !it.startsWith("__") }
+            .toList()
 
         val expected = setOf("netbridge_get_api")
         val unexpected = exported - expected
@@ -236,8 +236,8 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
                 if (dir.isDirectory) {
                     dir.walkTopDown()
-                            .filter { it.isFile && it.name.endsWith(".java") }
-                            .toList()
+                        .filter { it.isFile && it.name.endsWith(".java") }
+                        .toList()
                 } else {
                     emptyList()
                 }
@@ -261,11 +261,13 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
         )
 
-        // Jackson Core may only be imported by the two NetBridge JSON codecs; Gson may
-        // only be imported in the shared Minecraft adapter layer (Mojang boundary).
+        // Jackson Core may only be imported by the two NetBridge JSON codecs plus the
+        // benchmark recorder boundary; Gson may only be imported in the shared Minecraft
+        // adapter layer (Mojang boundary).
         val jsonCodecAllowlist = setOf(
             "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCodec.java",
-            "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/NativeManifestCodec.java"
+            "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/NativeManifestCodec.java",
+            "minecraft/src/main/java/top/tangge233/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
         )
 
         for (file in production) {
@@ -283,7 +285,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
             if (
                 Regex("\\bSystem\\.loadLibrary\\b|\\bSystem\\.load\\b")
-                        .containsMatchIn(text)
+                    .containsMatchIn(text)
             ) {
                 failures.add(
                     "$rel: System.load/loadLibrary is forbidden (FFM libraryLookup only)"
@@ -387,7 +389,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
             if (
                 Regex("import\\s+net\\.(minecraft|fabricmc|neoforged)")
-                        .containsMatchIn(file.readText())
+                    .containsMatchIn(file.readText())
             ) {
                 failures.add(
                     "$rel: common must not import Minecraft or loader APIs"
@@ -400,7 +402,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
             if (
                 Regex("import\\s+net\\.(fabricmc|neoforged)")
-                        .containsMatchIn(file.readText())
+                    .containsMatchIn(file.readText())
             ) {
                 failures.add(
                     "$rel: shared minecraft layer must not import loader APIs"
@@ -436,21 +438,21 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             }
 
             val packages = root.walkTopDown()
-                    .filter {
-                        it.isDirectory &&
-                                it.listFiles { file: File ->
-                                    file.name.endsWith(".java")
-                                }?.isNotEmpty() == true
-                    }
-                    .toList()
+                .filter {
+                    it.isDirectory &&
+                            it.listFiles { file: File ->
+                                file.name.endsWith(".java")
+                            }?.isNotEmpty() == true
+                }
+                .toList()
 
             for (pkg in packages) {
                 val hasInfo = pkg.resolve("package-info.java").isFile
 
                 if (!hasInfo) {
                     val rel = pkg.relativeTo(rootDir)
-                            .path
-                            .replace('\\', '/')
+                        .path
+                        .replace('\\', '/')
 
                     failures.add(
                         "$rel: missing package-info.java (@NullMarked required)"
@@ -471,65 +473,65 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
         if (coreSrc.isDirectory) {
             coreSrc.walkTopDown()
-                    .filter { it.isFile && it.name.endsWith(".rs") }
-                    .forEach { file ->
-                        val rel = file.relativeTo(rootDir).path.replace('\\', '/')
-                        val text = file.readText()
+                .filter { it.isFile && it.name.endsWith(".rs") }
+                .forEach { file ->
+                    val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+                    val text = file.readText()
 
-                        if (
-                            text.contains("extern \"C\"") ||
-                            text.contains("use jni") ||
-                            text.contains("JavaVM")
-                        ) {
-                            failures.add(
-                                "$rel: FFI/JNI constructs are forbidden in net-bridge-core"
-                            )
-                        }
-
-                        if (
-                            Regex(
-                                "(?m)^static\\s+(mut\\s+)?" +
-                                        "(RUNTIME|CONNS|SERVERS|NEXT_ID|EVENT_SINK)\\b"
-                            ).containsMatchIn(text)
-                        ) {
-                            failures.add(
-                                "$rel: process-global native registries are forbidden " +
-                                        "in net-bridge-core"
-                            )
-                        }
-
-                        if (
-                            text.contains("BridgeError::Other") ||
-                            text.contains("Other(")
-                        ) {
-                            failures.add(
-                                "$rel: BridgeError::Other escape hatch is forbidden " +
-                                        "in net-bridge-core"
-                            )
-                        }
-
-                        if (
-                            !rel.contains("tests") &&
-                            !rel.contains("context.rs") &&
-                            !rel.contains("lib.rs") &&
-                            text.contains(".on_event(")
-                        ) {
-                            failures.add(
-                                "$rel: direct on_event call is forbidden; " +
-                                        "use unified event publisher"
-                            )
-                        }
-
-                        if (
-                            rel.startsWith("rust/crates/net-bridge-core/src/transport/") &&
-                            !rel.contains("tests") &&
-                            text.contains("tokio::spawn")
-                        ) {
-                            failures.add(
-                                "$rel: raw tokio::spawn in transports is forbidden"
-                            )
-                        }
+                    if (
+                        text.contains("extern \"C\"") ||
+                        text.contains("use jni") ||
+                        text.contains("JavaVM")
+                    ) {
+                        failures.add(
+                            "$rel: FFI/JNI constructs are forbidden in net-bridge-core"
+                        )
                     }
+
+                    if (
+                        Regex(
+                            "(?m)^static\\s+(mut\\s+)?" +
+                                    "(RUNTIME|CONNS|SERVERS|NEXT_ID|EVENT_SINK)\\b"
+                        ).containsMatchIn(text)
+                    ) {
+                        failures.add(
+                            "$rel: process-global native registries are forbidden " +
+                                    "in net-bridge-core"
+                        )
+                    }
+
+                    if (
+                        text.contains("BridgeError::Other") ||
+                        text.contains("Other(")
+                    ) {
+                        failures.add(
+                            "$rel: BridgeError::Other escape hatch is forbidden " +
+                                    "in net-bridge-core"
+                        )
+                    }
+
+                    if (
+                        !rel.contains("tests") &&
+                        !rel.contains("context.rs") &&
+                        !rel.contains("lib.rs") &&
+                        text.contains(".on_event(")
+                    ) {
+                        failures.add(
+                            "$rel: direct on_event call is forbidden; " +
+                                    "use unified event publisher"
+                        )
+                    }
+
+                    if (
+                        rel.startsWith("rust/crates/net-bridge-core/src/transport/") &&
+                        !rel.contains("tests") &&
+                        text.contains("tokio::spawn")
+                    ) {
+                        failures.add(
+                            "$rel: raw tokio::spawn in transports is forbidden"
+                        )
+                    }
+                }
         }
 
         val coreCargo = rootDir.resolve("rust/crates/net-bridge-core/Cargo.toml")
@@ -611,4 +613,12 @@ tasks.register("printVersions") {
 
         println("Minecraft: $mcVer (NeoForge $neoVer / Fabric $mcVer)")
     }
+}
+
+// Convenience alias so `./gradlew benchmarkAll` works from the root project.
+// Delegates to the on-demand benchmark aggregate; never wired into check/build.
+tasks.register("benchmarkAll") {
+    group = "benchmark"
+    description = "Runs the full on-demand benchmark suite (:benchmark:benchmarkAll)."
+    dependsOn(":benchmark:benchmarkAll")
 }

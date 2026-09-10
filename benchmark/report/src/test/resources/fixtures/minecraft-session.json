@@ -1,0 +1,41 @@
+{
+  "suite": "minecraft",
+  "startedAt": "2026-09-08T20:00:00.123456Z",
+  "environment": {
+    "os": "Linux",
+    "jdkVersion": "25.0.3",
+    "recorder": "MinecraftBenchmarkRecorder"
+  },
+  "results": [
+    {
+      "name": "CONNECT_REQUESTED",
+      "wallNanos": 1234567890123,
+      "at": "2026-09-08T20:00:00.123Z",
+      "host": "mc.example",
+      "port": 25565
+    },
+    {
+      "name": "TRANSPORT_CONNECTED",
+      "wallNanos": 1234567891123,
+      "at": "2026-09-08T20:00:00.223Z",
+      "host": "mc.example",
+      "port": 25565
+    },
+    {
+      "name": "LOGIN_COMPLETE",
+      "wallNanos": 1244567891123,
+      "at": "2026-09-08T20:00:01.223Z"
+    },
+    {
+      "name": "PLAY_ENTERED",
+      "wallNanos": 1249567891123,
+      "at": "2026-09-08T20:00:01.723Z"
+    },
+    {
+      "name": "FIRST_CHUNK",
+      "wallNanos": 1254567891123,
+      "at": "2026-09-08T20:00:02.223Z",
+      "uniqueChunks": 1
+    }
+  ]
+}

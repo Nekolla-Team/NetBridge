@@ -20,6 +20,7 @@ dependencies {
 
     implementation(project(":common"))
     implementation(libs.bundles.netty)
+    implementation(libs.jackson.core)
 }
 
 val libBundle = configurations.create("libBundle") {

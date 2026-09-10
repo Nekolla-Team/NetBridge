@@ -2,6 +2,7 @@
 members = [
     "crates/net-bridge-core",
     "crates/net-bridge-native",
+    "crates/net-bridge-benchmark-native",
     "xtask",
 ]
 resolver = "2"

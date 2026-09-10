@@ -19,11 +19,14 @@ object NativePlatform {
         else -> archName
     }
 
-    val cdylibName: String = when (os) {
-        "windows" -> "net_bridge_native.dll"
-        "macos" -> "libnet_bridge_native.dylib"
-        else -> "libnet_bridge_native.so"
-    }
+    val cdylibName: String = cdylibNameFor("net_bridge_native")
+
+    fun cdylibNameFor(libraryBaseName: String): String =
+        when (os) {
+            "windows" -> "$libraryBaseName.dll"
+            "macos" -> "lib$libraryBaseName.dylib"
+            else -> "lib$libraryBaseName.so"
+        }
 
     val subdir: String = "$os-$arch"
 

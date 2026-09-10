@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.client.AccelerationInterceptionScope;
 import top.tangge233.netbridge.mc.NativeClientTransport;
+import top.tangge233.netbridge.mc.benchmark.MinecraftBenchmarkRecorder;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;
@@ -28,6 +29,10 @@ public abstract class ConnectionMixin {
             Connection connection,
             CallbackInfoReturnable<ChannelFuture> cir
     ) {
+        if (MinecraftBenchmarkRecorder.enabled()) {
+            MinecraftBenchmarkRecorder.get().connectRequested(address);
+        }
+
         if (AccelerationInterceptionScope.isVanillaConnectBypass()
                 || AccelerationInterceptionScope.isAcceleratedConnectInProgress()
         ) {
@@ -48,6 +53,28 @@ public abstract class ConnectionMixin {
                         )
                 )
         );
+    }
+
+    @Inject(
+            method = "connect",
+            at = @At("RETURN")
+    )
+    private static void netbridge$recordTransportConnected(
+            InetSocketAddress address,
+            boolean useEpoll,
+            Connection connection,
+            CallbackInfoReturnable<ChannelFuture> cir
+    ) {
+        if (!MinecraftBenchmarkRecorder.enabled()) {
+            return;
+        }
+
+        var future = cir.getReturnValue();
+        future.addListener(result -> {
+            if (result.isSuccess()) {
+                MinecraftBenchmarkRecorder.get().transportConnected(address);
+            }
+        });
     }
 
 }

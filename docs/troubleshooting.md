@@ -57,4 +57,6 @@ Typical log: `net-bridge native unavailable; accelerated transports disabled (TC
   was removed.
 - Native integration tests: `./gradlew :common:nativeIntegrationTest`, which includes
   `--enable-native-access=ALL-UNNAMED` and `--illegal-native-access=deny`.
-- Benchmark: `./gradlew :common:ffmBenchmark`; see `docs/benchmarks/ffm-baseline.md`.
+- Benchmark: run the standalone `:benchmark` suite on demand (e.g. `./gradlew :benchmark:jmh`,
+  `./gradlew :benchmark:transportBenchmark`); see `docs/benchmarks/README.md`. Benchmarks never run
+  as part of `check`, `test`, or the normal CI workflows.

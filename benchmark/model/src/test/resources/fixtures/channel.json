@@ -1,0 +1,108 @@
+{
+  "suite": "channel",
+  "environment": {
+    "suiteVersion": "1",
+    "timestamp": "2026-09-08T17:40:33.397127899Z",
+    "gitCommit": "2022443d4d02713ba6f95a729424fea03ba45497",
+    "gitDirty": true,
+    "os": "Linux",
+    "osVersion": "6.18.33.2-microsoft-standard-WSL2",
+    "arch": "amd64",
+    "availableProcessors": 16,
+    "jdkVendor": "Eclipse Adoptium",
+    "jdkVersion": "25.0.3",
+    "jvmName": "OpenJDK 64-Bit Server VM",
+    "jvmVersion": "25.0.3+9-LTS",
+    "maxHeapBytes": 4714397696,
+    "rustVersion": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "nativeWorkerCount": 2,
+    "nativeLibrary": "/mnt/d/Github/source/repos/NetBridge/benchmark/build/native/runtime/linux-x86_64/libnet_bridge_native.so",
+    "nativeLibrarySha256": "70749abab48ad14ef16b88452a31e3b513283326ca8607f5cedb5366cfc17123"
+  },
+  "configuration": {
+    "transports": [
+      "quic"
+    ],
+    "cases": [
+      "rtt",
+      "throughput"
+    ],
+    "host": "127.0.0.1",
+    "port": 0,
+    "workers": 2,
+    "rttPayloadBytes": 1024,
+    "throughputDurationMillis": 1500,
+    "connectIterations": 5,
+    "rttMeasuredIterations": 5,
+    "startServer": true,
+    "nativeLibrary": "/mnt/d/Github/source/repos/NetBridge/benchmark/build/native/runtime/linux-x86_64/libnet_bridge_native.so"
+  },
+  "results": [
+    {
+      "name": "rtt",
+      "transport": "quic",
+      "payloadBytes": 64,
+      "samples": 5,
+      "meanNanos": 2003354.2,
+      "minNanos": 1270612,
+      "maxNanos": 3179426,
+      "p50Nanos": 1668007,
+      "p95Nanos": 3179426,
+      "p99Nanos": 3179426,
+      "p999Nanos": 3179426,
+      "processCpuNanos": 220000000
+    },
+    {
+      "name": "rtt",
+      "transport": "quic",
+      "payloadBytes": 256,
+      "samples": 5,
+      "meanNanos": 1263182.8,
+      "minNanos": 918627,
+      "maxNanos": 1665741,
+      "p50Nanos": 1240410,
+      "p95Nanos": 1665741,
+      "p99Nanos": 1665741,
+      "p999Nanos": 1665741,
+      "processCpuNanos": 110000000
+    },
+    {
+      "name": "rtt",
+      "transport": "quic",
+      "payloadBytes": 1024,
+      "samples": 5,
+      "meanNanos": 1125746,
+      "minNanos": 987852,
+      "maxNanos": 1394986,
+      "p50Nanos": 1077925,
+      "p95Nanos": 1394986,
+      "p99Nanos": 1394986,
+      "p999Nanos": 1394986,
+      "processCpuNanos": 120000000
+    },
+    {
+      "name": "rtt",
+      "transport": "quic",
+      "payloadBytes": 4096,
+      "samples": 5,
+      "meanNanos": 1765459.2,
+      "minNanos": 1393544,
+      "maxNanos": 2430914,
+      "p50Nanos": 1519055,
+      "p95Nanos": 2430914,
+      "p99Nanos": 2430914,
+      "p999Nanos": 2430914,
+      "processCpuNanos": 150000000
+    },
+    {
+      "name": "throughput",
+      "transport": "quic",
+      "payloadBytes": 65536,
+      "durationNanos": 1516758064,
+      "payloadBytesTransferred": 72679424,
+      "mibPerSecond": 45.69779561099469,
+      "processCpuNanos": 6880000000,
+      "integrityError": false
+    }
+  ]
+}

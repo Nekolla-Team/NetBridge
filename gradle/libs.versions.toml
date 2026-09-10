@@ -6,6 +6,14 @@ fabric-loom = "1.17.19"
 fabric-loader = "0.17.2"
 mixin = "0.15.2+mixin.0.8.7"
 
+jmh = "1.37"
+jmh-gradle = "0.7.3"
+
+kotlin = "2.3.21"
+clikt = "5.1.0"
+jte = "3.2.4"
+jsoup = "1.23.2"
+
 netty = "4.1.97.Final"
 slf4j = "2.0.13"
 jackson = "3.1.6"
@@ -27,6 +35,14 @@ mixin = { module = "net.fabricmc:sponge-mixin", version.ref = "mixin" }
 slf4j = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
 jackson-core = { module = "tools.jackson.core:jackson-core", version.ref = "jackson" }
+jackson-databind = { module = "tools.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-kotlin = { module = "tools.jackson.module:jackson-module-kotlin", version.ref = "jackson" }
+kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+clikt = { module = "com.github.ajalt.clikt:clikt-jvm", version.ref = "clikt" }
+jte = { module = "gg.jte:jte", version.ref = "jte" }
+jte-kotlin = { module = "gg.jte:jte-kotlin", version.ref = "jte" }
+jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
 nightconfig-core = { module = "com.electronwill.night-config:core", version.ref = "night-config" }
 nightconfig-toml = { module = "com.electronwill.night-config:toml", version.ref = "night-config" }
 
@@ -51,12 +67,19 @@ errorprone-core = { module = "com.google.errorprone:error_prone_core", version.r
 errorprone-gradle = { module = "net.ltgt.gradle:gradle-errorprone-plugin", version.ref = "errorprone-gradle" }
 nullaway-gradle = { module = "net.ltgt.gradle:gradle-nullaway-plugin", version.ref = "nullaway-gradle" }
 
+jmh-core = { module = "org.openjdk.jmh:jmh-core", version.ref = "jmh" }
+jmh-generator-annprocess = { module = "org.openjdk.jmh:jmh-generator-annprocess", version.ref = "jmh" }
+jmh-gradle-plugin = { module = "me.champeau.jmh:jmh-gradle-plugin", version.ref = "jmh-gradle" }
+
 [bundles]
 netty = ["netty-common", "netty-buffer", "netty-transport", "netty-handler"]
 nightconfig = ["nightconfig-core", "nightconfig-toml"]
 
 [plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+jte = { id = "gg.jte.gradle", version.ref = "jte" }
 fabric-loom = { id = "fabric-loom", version.ref = "fabric-loom" }
 neoforge-moddev = { id = "net.neoforged.moddev", version.ref = "neoforge-moddev" }
 errorprone = { id = "net.ltgt.errorprone", version.ref = "errorprone-gradle" }
 nullaway = { id = "net.ltgt.nullaway", version.ref = "nullaway-gradle" }
+jmh = { id = "me.champeau.jmh", version.ref = "jmh-gradle" }

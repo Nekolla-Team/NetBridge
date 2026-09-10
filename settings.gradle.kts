@@ -33,5 +33,8 @@ rootProject.name = "net-bridge"
 includeBuild("build-logic")
 
 include("common")
+include("benchmark")
+include("benchmark:model")
+include("benchmark:report")
 include("neoforge")
 include("fabric")
