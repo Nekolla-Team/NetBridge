@@ -1,0 +1,86 @@
+name: benchmark
+
+# On-demand performance suite. Never part of the normal CI gate.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which suite to run
+        type: choice
+        default: micro
+        options:
+          - micro
+          - transport
+          - all
+      profile:
+        description: Benchmark profile (quick = short warmup/iterations)
+        type: choice
+        default: quick
+        options:
+          - quick
+          - normal
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: gradle-${{ runner.os }}-benchmark
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Micro benchmarks (JMH)
+        if: ${{ inputs.suite == 'micro' || inputs.suite == 'all' }}
+        run: |
+          if [ "${{ inputs.profile }}" = "quick" ]; then
+            ./gradlew :benchmark:jmhQuick --stacktrace
+          else
+            ./gradlew :benchmark:jmh --stacktrace
+          fi
+
+      - name: Transport benchmark
+        if: ${{ inputs.suite == 'transport' || inputs.suite == 'all' }}
+        run: |
+          if [ "${{ inputs.profile }}" = "quick" ]; then
+            ./gradlew :benchmark:transportBenchmark -PbenchmarkWorkload=3000 --stacktrace
+          else
+            ./gradlew :benchmark:transportBenchmark --stacktrace
+          fi
+
+      - name: Minecraft-shaped workloads
+        if: ${{ inputs.suite == 'all' }}
+        run: ./gradlew :benchmark:minecraftTraffic -PbenchmarkTransport=tcp --stacktrace
+
+      - name: NativeChannel integration
+        if: ${{ inputs.suite == 'all' }}
+        run: |
+          if [ "${{ inputs.profile }}" = "quick" ]; then
+            ./gradlew :benchmark:channelIntegration -PbenchmarkWorkload=3000 --stacktrace
+          else
+            ./gradlew :benchmark:channelIntegration --stacktrace
+          fi
+
+      - name: Refresh report catalog
+        if: always()
+        run: ./gradlew :benchmark:benchmarkReport --stacktrace || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            benchmark/build/results/
+            benchmark/build/reports/benchmarks/

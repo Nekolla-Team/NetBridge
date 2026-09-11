@@ -1,7 +1,0 @@
-empty downcall (connection_state)  ops=20000  avg=    0.03 us/op
-write+read 1KiB                   ops=20000  avg=  379.17 us/op
-write+read 1KiB                   p50=  300.98 us  p95=  297.90 us  p99=  267.51 us  (n=20000)
-write+read 64KiB                  ops=2500  avg= 1606.95 us/op
-write+read 64KiB                  p50= 1434.39 us  p95= 1972.19 us  p99= 1286.71 us  (n=2500)
-QUIC loopback throughput          throughput       60.3 MiB/s  (301 MiB sent in 5.00s)
-QUIC loopback throughput          p50=   40.59 us  p95=  610.63 us  p99= 1971.24 us  (n=27939)

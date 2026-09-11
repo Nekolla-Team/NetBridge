@@ -1,0 +1,42 @@
+{
+  "suite": "minecraft-shaped",
+  "environment": {
+    "suiteVersion": "1",
+    "timestamp": "2026-09-09T12:20:58.166945509Z",
+    "gitCommit": "2022443d4d02713ba6f95a729424fea03ba45497",
+    "gitDirty": true,
+    "os": "Linux",
+    "osVersion": "6.18.33.2-microsoft-standard-WSL2",
+    "arch": "amd64",
+    "availableProcessors": 16,
+    "jdkVendor": "Eclipse Adoptium",
+    "jdkVersion": "25.0.3",
+    "jvmName": "OpenJDK 64-Bit Server VM",
+    "jvmVersion": "25.0.3+9-LTS",
+    "maxHeapBytes": 4714397696,
+    "rustVersion": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "nativeWorkerCount": 2
+  },
+  "configuration": {
+    "transports": [
+      "tcp"
+    ],
+    "workloads": [
+      "login"
+    ],
+    "workers": 2
+  },
+  "results": [
+    {
+      "name": "login",
+      "transport": "tcp",
+      "payloadBytes": 2706,
+      "messages": 9,
+      "durationNanos": 536804070,
+      "completionTimeNanos": 536804070,
+      "mibPerSecond": 0.004807420145296799,
+      "processCpuNanos": 200000000,
+      "smallMessageCount": 0
+    }
+  ]
+}

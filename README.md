@@ -113,9 +113,18 @@ The game (and any dedicated server) must run on Java 25 with FFM enabled:
 ./gradlew test                                  # pure Java tests (no native required)
 cargo test --workspace                          # Rust core/native tests
 ./gradlew :common:nativeIntegrationTest         # FFM integration tests (QUIC/KCP loopback)
-./gradlew :common:ffmBenchmark                  # FFM data-plane benchmark
 ./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest
 ```
+
+Benchmarks live in the standalone `:benchmark` module (on demand, never part of `check`/`test`/CI):
+
+```bash
+./gradlew :benchmark:jmh                         # all JMH microbenchmarks
+./gradlew :benchmark:transportBenchmark          # L2 transport comparison (TCP/QUIC/KCP)
+./gradlew :benchmark:minecraftTraffic            # Minecraft-shaped workload comparison
+```
+
+See `docs/benchmarks/README.md` for the full suite guide.
 
 The public C ABI header (`rust/crates/net-bridge-native/include/netbridge.h`) is **generated** from
 the Rust ABI definitions with pinned cbindgen and checked in. It must never be hand-edited:
