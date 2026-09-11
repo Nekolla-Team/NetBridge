@@ -113,9 +113,9 @@ val buildProbeNative = tasks.register<BuildNativeLibrary>("buildProbeNative") {
 // properties on the forked process command line.
 fun stagedNativePath(dir: Provider<out Directory>, baseName: String): String =
     dir.get().asFile
-        .resolve(NativePlatform.subdir)
-        .resolve(NativePlatform.cdylibNameFor(baseName))
-        .absolutePath
+            .resolve(NativePlatform.subdir)
+            .resolve(NativePlatform.cdylibNameFor(baseName))
+            .absolutePath
 
 val runtimeNativeLibPath: String = stagedNativePath(runtimeNativeDir, "net_bridge_native")
 val probeNativeLibPath: String = stagedNativePath(probeNativeDir, "net_bridge_benchmark_native")
@@ -331,6 +331,7 @@ val benchmarkCaseProp = providers.gradleProperty("benchmarkCase")
 val benchmarkHostProp = providers.gradleProperty("benchmarkHost")
 val benchmarkPortProp = providers.gradleProperty("benchmarkPort")
 val benchmarkWorkloadProp = providers.gradleProperty("benchmarkWorkload")
+val benchmarkDurationProp = providers.gradleProperty("benchmarkDuration")
 val benchmarkPayloadProp = providers.gradleProperty("benchmarkPayload")
 val benchmarkIterationsProp = providers.gradleProperty("benchmarkIterations")
 
@@ -386,7 +387,7 @@ fun registerTransportTask(
                 benchmarkCaseProp.orNull?.let { add("--case"); add(it) }
                 benchmarkHostProp.orNull?.let { add("--host"); add(it) }
                 benchmarkPortProp.orNull?.let { add("--port"); add(it) }
-                benchmarkWorkloadProp.orNull?.let { add("--duration"); add(it) }
+                benchmarkDurationProp.orNull?.let { add("--duration"); add(it) }
                 benchmarkPayloadProp.orNull?.let { add("--payload"); add(it) }
                 benchmarkIterationsProp.orNull?.let { add("--iterations"); add(it) }
                 addAll(extraArgs)
@@ -443,7 +444,7 @@ tasks.register<JavaExec>("channelIntegration") {
         buildList {
             benchmarkTransportProp.orNull?.let { add("--transport"); add(it) }
             benchmarkCaseProp.orNull?.let { add("--case"); add(it) }
-            benchmarkWorkloadProp.orNull?.let { add("--duration"); add(it) }
+            benchmarkDurationProp.orNull?.let { add("--duration"); add(it) }
             benchmarkIterationsProp.orNull?.let { add("--iterations"); add(it) }
         }
     }

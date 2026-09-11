@@ -218,8 +218,7 @@ class TransportRunner(private val log: PrintStream) {
             val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             Thread.sleep(cfg.throughputDurationMillis)
             session.stopStreaming()
-
-            val done = await(outcome)
+            val wallNanos = await(outcome).wallNanos
             val serverBytes = session.requestReport().get(
                 cfg.runTimeoutMillis,
                 TimeUnit.MILLISECONDS
@@ -231,7 +230,7 @@ class TransportRunner(private val log: PrintStream) {
                 transport,
                 STREAM_CHUNK_BYTES,
                 serverBytes,
-                done.wallNanos,
+                wallNanos,
                 cpuEnd - cpuStart,
                 hasIntegrityError(serverBytes, session)
             )
@@ -257,14 +256,12 @@ class TransportRunner(private val log: PrintStream) {
             val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             Thread.sleep(cfg.throughputDurationMillis)
             session.stopStreaming()
-
-            val done = await(outcome)
+            val wall = await(outcome).wallNanos
             val serverBytes = session.requestReport().get(
                 cfg.runTimeoutMillis,
                 TimeUnit.MILLISECONDS
             )
             val cpuEnd = processCpuNanos()
-            val wall = done.wallNanos
             val inbound = session.clientReceivedBytes
             val total = serverBytes + inbound
             val integrityError = hasIntegrityError(serverBytes, session)
@@ -306,13 +303,13 @@ class TransportRunner(private val log: PrintStream) {
                 idle.add(session.ping(LOADED_PING_BYTES))
             }
 
-            val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             val loaded = LatencySamples()
             val deadline = System.nanoTime() +
                     TimeUnit.MILLISECONDS.toNanos(cfg.throughputDurationMillis)
+            val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             while (System.nanoTime() < deadline) {
-                loaded.add(session.ping(LOADED_PING_BYTES))
                 Thread.sleep(LOADED_PING_INTERVAL_MILLIS)
+                loaded.add(session.ping(LOADED_PING_BYTES))
             }
             session.stopStreaming()
             await(outcome)

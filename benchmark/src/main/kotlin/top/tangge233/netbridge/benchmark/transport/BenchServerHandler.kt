@@ -9,7 +9,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class BenchServerHandler : ChannelInboundHandlerAdapter() {
 
     private val backStreamStarted = AtomicBoolean(false)
+    private val backStreamPending = AtomicBoolean(false)
     private val corruptFrameObservedFlag = AtomicBoolean(false)
+    private var backStreamPayload: Int = 0
     private var appBytesReceived: Long = 0L
     private var serverSeq: Long = 0L
     private var closing: Boolean = false
@@ -96,11 +98,29 @@ class BenchServerHandler : ChannelInboundHandlerAdapter() {
         }
     }
 
+    override fun channelWritabilityChanged(ctx: ChannelHandlerContext) {
+        if (ctx.channel().isWritable
+            && backStreamPending.compareAndSet(true, false)
+        ) {
+            val payload = backStreamPayload
+            ctx.channel().eventLoop().execute {
+                streamBack(ctx, payload)
+            }
+        }
+        ctx.fireChannelWritabilityChanged()
+    }
+
     private fun streamBack(
         ctx: ChannelHandlerContext,
         payloadBytes: Int
     ) {
         if (closing || !ctx.channel().isActive) {
+            return
+        }
+
+        if (!ctx.channel().isWritable) {
+            backStreamPayload = payloadBytes
+            backStreamPending.set(true)
             return
         }
 

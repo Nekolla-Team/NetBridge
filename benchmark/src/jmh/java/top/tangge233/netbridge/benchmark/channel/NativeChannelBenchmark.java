@@ -48,23 +48,25 @@ public class NativeChannelBenchmark {
 
     @Benchmark
     public void readAutoRead(ChannelState s, Blackhole bh) {
-        s.channel.config().setAutoRead(true);
         var before = s.counting.delivered.get();
         s.connection.push(s.pushChunk);
+        s.readOnLoop();
         bh.consume(s.awaitDelivered(before + s.size));
     }
 
     @Benchmark
     public void readManual(ChannelState s, Blackhole bh) {
-        s.channel.config().setAutoRead(false);
+        if (s.channel.config().isAutoRead()) {
+            s.setAutoReadOnLoop(false);
+        }
         var before = s.counting.delivered.get();
         s.connection.push(s.pushChunk);
-        s.channel.read();
+        s.readOnLoop();
         bh.consume(s.awaitDelivered(before + s.size));
     }
 
     @Benchmark
-    public void wouldBlockRecovery(WouldBlockState s, Blackhole bh) {
+    public void wouldBlockRecovery(ChannelState s, Blackhole bh) {
         var baseline = s.connection.wouldBlockWrites();
         s.connection.setWriteWouldBlock(true);
         var chunk = s.master.retainedDuplicate();
@@ -113,8 +115,9 @@ public class NativeChannelBenchmark {
             pushChunk = pattern;
             master = Unpooled.buffer(size);
             master.writeBytes(pattern);
-            // Arm the read path once (auto-read default on).
-            channel.read();
+            // Arm the read path once, on the event loop: NativeChannel drains inline
+            // from read()/doBeginRead(), so it must not run on the benchmark thread.
+            readOnLoop();
         }
 
         void awaitTrue(BooleanSupplier condition) {
@@ -127,6 +130,18 @@ public class NativeChannelBenchmark {
             }
         }
 
+        void readOnLoop() {
+            channel.eventLoop()
+                    .submit(() -> channel.read())
+                    .syncUninterruptibly();
+        }
+
+        void setAutoReadOnLoop(boolean value) {
+            channel.eventLoop()
+                    .submit(() -> channel.config().setAutoRead(value))
+                    .syncUninterruptibly();
+        }
+
         @TearDown(Level.Trial)
         public void tearDown() {
             try {
@@ -135,7 +150,7 @@ public class NativeChannelBenchmark {
                 Thread.currentThread().interrupt();
             }
             master.release();
-            group.shutdownGracefully(0, 5, TimeUnit.SECONDS);
+            group.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
         }
 
         long awaitDelivered(long atLeast) {
@@ -147,19 +162,6 @@ public class NativeChannelBenchmark {
                 Thread.onSpinWait();
             }
             return counting.delivered.get();
-        }
-
-    }
-
-    /** Separate state where every write reports WOULD_BLOCK until WRITABLE. */
-    @State(Scope.Benchmark)
-    public static class WouldBlockState extends ChannelState {
-
-        @Override
-        @Setup(Level.Trial)
-        public void setUp() {
-            super.setUp();
-            connection.setWriteWouldBlock(true);
         }
 
     }

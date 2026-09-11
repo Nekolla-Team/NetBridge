@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 private const val WRITE_WINDOW = 16
 private const val DEFAULT_PING_TIMEOUT_MILLIS = 5_000L
+private const val ACK_WINDOW_BYTES = 4L * 1024 * 1024
 
 class ClientSession private constructor(
     val channel: Channel,
@@ -33,6 +34,8 @@ class ClientSession private constructor(
         )
     private var streamPayload: Int = 0
     private var outstanding: Int = 0
+    private var bytesSinceAck: Long = 0L
+    private var awaitingAck: Boolean = false
     private var streamStartNanos: Long = 0L
     private var streamEndNanos: Long = 0L
     private var streamSentBytes: Long = 0L
@@ -86,6 +89,8 @@ class ClientSession private constructor(
         streamPayload = payloadBytes
         streamStop.set(false)
         streamFinished.set(false)
+        bytesSinceAck = 0L
+        awaitingAck = false
 
         val outcome = CompletableFuture<StreamOutcome>()
         streamOutcome = outcome
@@ -110,11 +115,19 @@ class ClientSession private constructor(
 
         var stopped = streamStop.get()
         var closed = !channel.isActive
-        while (!stopped && !closed && outstanding < WRITE_WINDOW) {
+        while (!stopped
+            && !closed
+            && outstanding < WRITE_WINDOW
+            && !awaitingAck
+        ) {
             sendNext()
+            if (bytesSinceAck >= ACK_WINDOW_BYTES) {
+                sendStreamAck()
+            }
             stopped = streamStop.get()
             closed = !channel.isActive
         }
+
         if ((stopped || closed) && outstanding == 0) {
             finishStream()
         }
@@ -125,6 +138,7 @@ class ClientSession private constructor(
         outstanding++
         val payload = streamPayload
         streamSentBytes += payload
+        bytesSinceAck += payload
         sentBytesCounter.addAndGet(payload.toLong())
         val frame = TransportPayloadCodec.encodeFrame(
             channel.alloc(),
@@ -148,6 +162,28 @@ class ClientSession private constructor(
             streamStop.set(true)
             pump()
         }
+    }
+
+    private fun sendStreamAck() {
+        if (awaitingAck || streamFinished.get()) {
+            return
+        }
+
+        awaitingAck = true
+        bytesSinceAck = 0L
+        val seq = nextSequence()
+        pendingPings[seq] = PendingPing(System.nanoTime()) {
+            awaitingAck = false
+            pump()
+        }
+        channel.writeAndFlush(
+            TransportPayloadCodec.encodeFrame(
+                channel.alloc(),
+                FrameType.PING,
+                seq,
+                0
+            )
+        )
     }
 
     private fun finishStream() {
@@ -196,7 +232,10 @@ class ClientSession private constructor(
         val wallNanos: Long
     )
 
-    private class PendingPing(val sentNanos: Long) {
+    private class PendingPing(
+        val sentNanos: Long,
+        val onAck: (() -> Unit)? = null
+    ) {
 
         val response: CompletableFuture<Long> = CompletableFuture()
 
@@ -243,6 +282,7 @@ class ClientSession private constructor(
                 corruptInboundFrames.incrementAndGet()
             }
             pending.response.complete(delta)
+            pending.onAck?.invoke()
         }
 
         private fun onData(seq: Long, frame: ByteBuf) {
@@ -293,9 +333,9 @@ class ClientSession private constructor(
                 object : ChannelInitializer<Channel>() {
                     override fun initChannel(ch: Channel) {
                         ch.pipeline()
-                            .addLast(TransportPayloadCodec.newDecoder())
-                            .addLast(TransportPayloadCodec.newPrepender())
-                            .addLast(handler)
+                                .addLast(TransportPayloadCodec.newDecoder())
+                                .addLast(TransportPayloadCodec.newPrepender())
+                                .addLast(handler)
                     }
                 }
             )
