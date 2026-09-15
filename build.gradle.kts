@@ -261,6 +261,14 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
         )
 
+        // The benchmark recorder owns a single daemon writer thread so milestone
+        // persistence never blocks the game/networking thread (audit B-020). It is
+        // benchmark-only, disabled unless -Dnetbridge.benchmark=true, and is not part
+        // of the production runtime lifecycle managed by the composition root.
+        val staticExecutorAllowlist = setOf(
+            "minecraft/src/main/java/top/tangge233/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
+        )
+
         // Jackson Core may only be imported by the two NetBridge JSON codecs plus the
         // benchmark recorder boundary; Gson may only be imported in the shared Minecraft
         // adapter layer (Mojang boundary).
@@ -334,7 +342,8 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
                             "(ExecutorService|ScheduledExecutorService|ThreadLocal)"
                 ).containsMatchIn(text) &&
                 rel !in mixinGuardAllowlist &&
-                rel !in runtimeAllowlist
+                rel !in runtimeAllowlist &&
+                rel !in staticExecutorAllowlist
             ) {
                 failures.add(
                     "$rel: static executor/thread-local outside the allowlist"
