@@ -45,6 +45,13 @@ class ReportCli : CliktCommand(name = "report") {
         mustExist = true,
         canBeFile = true
     )
+    private val jmhEnv by option(
+        "--jmh-env",
+        help = "Optional JMH execute-time environment sidecar (environment JSON)."
+    ).path(
+        mustExist = true,
+        canBeFile = true
+    )
     private val reportDir by option(
         "--report-dir",
         help = "Directory to write index.html and report-meta.json into."
@@ -65,12 +72,13 @@ class ReportCli : CliktCommand(name = "report") {
             inputs.task,
             inputs.raw,
             jmhOutput,
-            reportDir
+            reportDir,
+            jmhEnv
         )
         echo("report written: ${reportDir.resolve("index.html")}")
         echo(
             "report meta: task=${reportMeta.task} suite=${reportMeta.suite} " +
-                    "resultRows=${reportMeta.resultRows}"
+                "resultRows=${reportMeta.resultRows}"
         )
     }
 

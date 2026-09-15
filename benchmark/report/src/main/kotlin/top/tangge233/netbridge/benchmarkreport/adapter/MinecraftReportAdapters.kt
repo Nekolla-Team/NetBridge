@@ -1,5 +1,6 @@
 package top.tangge233.netbridge.benchmarkreport.adapter
 
+import top.tangge233.netbridge.benchmark.model.MinecraftSessionMilestone
 import top.tangge233.netbridge.benchmark.model.MinecraftSessionRunDocument
 import top.tangge233.netbridge.benchmark.model.MinecraftShapedConfigurationSnapshot
 import top.tangge233.netbridge.benchmark.model.MinecraftShapedRunDocument
@@ -78,7 +79,11 @@ object MinecraftShapedReportAdapter {
                             "Small Msg P99",
                             smallDuration(it.smallMessageCount, it.smallMessageP99Nanos)
                         ),
-                        Cell("CPU Time", DurationValue.ofNanos(it.processCpuNanos))
+                        Cell(
+                            "CPU Time",
+                            it.processCpuNanos?.let { cpu -> DurationValue.ofNanos(cpu) }
+                                ?: MissingValue()
+                        )
                     )
                 }
             )
@@ -133,36 +138,77 @@ object MinecraftSessionReportAdapter {
             scope("JDK Version", doc.environment.jdkVersion)
             scope("Recorder", doc.environment.recorder)
 
+            val firstWall = doc.results.firstNotNullOfOrNull { it.wallNanos }
+            var previousElapsed: Long? = null
+            val rows = doc.results.map { m ->
+                val elapsed =
+                    m.elapsedNanos
+                        ?: m.wallNanos
+                            ?.let { wall -> firstWall?.let { wall - it } }
+                val prev = previousElapsed
+                val delta = if (elapsed != null && prev != null) {
+                    elapsed - prev
+                } else {
+                    null
+                }
+
+                previousElapsed = elapsed
+                listOf(
+                    Cell(
+                        "Milestone",
+                        TextValue(m.name)
+                    ),
+                    Cell(
+                        "Elapsed",
+                        elapsed?.let { DurationValue.ofNanos(it) } ?: MissingValue()
+                    ),
+                    Cell(
+                        "Delta",
+                        delta?.let { DurationValue.ofNanos(it) } ?: MissingValue()
+                    ),
+                    Cell(
+                        "At",
+                        TextValue(m.at)
+                    ),
+                    Cell(
+                        "Target",
+                        targetCell(m)
+                    ),
+                    Cell(
+                        "Unique Chunks",
+                        m.uniqueChunks?.let { IntegerValue(it.toLong()) } ?: MissingValue()
+                    )
+                )
+            }
+
             table(
                 title = "Session Milestones",
                 description = "Milestones recorded during a live Minecraft client session.",
                 headers = listOf(
                     "Milestone",
+                    "Elapsed",
+                    "Delta",
                     "At",
-                    "Host",
-                    "Port",
-                    "Unique Chunks",
-                    "Wall Time"
+                    "Target",
+                    "Unique Chunks"
                 ),
-                rows = doc.results.map { m ->
-                    listOf(
-                        Cell("Milestone", TextValue(m.name)),
-                        Cell("At", TextValue(m.at)),
-                        Cell("Host", m.host?.let { TextValue(it) } ?: MissingValue()),
-                        Cell(
-                            "Port",
-                            m.port?.let { IntegerValue(it.toLong()) } ?: MissingValue()
-                        ),
-                        Cell(
-                            "Unique Chunks",
-                            m.uniqueChunks?.let { IntegerValue(it.toLong()) } ?: MissingValue()
-                        ),
-                        Cell("Wall Time", DurationValue.ofNanos(m.wallNanos))
-                    )
-                }
+                rows = rows
             )
 
             artifact("raw.json", "Canonical ResultEnvelope JSON")
         }
+
+    private fun targetCell(m: MinecraftSessionMilestone): ReportValue {
+        val kind = m.targetKind
+        val hash = m.targetHash
+        if (kind != null || hash != null) {
+            return TextValue(
+                listOfNotNull(kind, hash?.let { "#$it" }).joinToString(" ")
+            )
+        }
+
+        val host = m.host ?: return MissingValue()
+        return TextValue(if (m.port != null) "$host:${m.port}" else host)
+    }
 
 }

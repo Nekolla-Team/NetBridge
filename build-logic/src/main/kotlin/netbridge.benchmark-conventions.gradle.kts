@@ -2,6 +2,7 @@ import me.champeau.jmh.JMHTask
 import me.champeau.jmh.JmhParameters
 import top.tangge233.netbridge.build.BuildNativeLibrary
 import top.tangge233.netbridge.build.NativePlatform
+import java.time.Instant
 
 // ---------------------------------------------------------------------------
 // netbridge.benchmark-conventions
@@ -11,14 +12,82 @@ import top.tangge233.netbridge.build.NativePlatform
 //   * benchmark-native staging (generalized BuildNativeLibrary)
 //   * JMH default ("normal") profile + quick/normal suite wrappers
 //   * transport / channel / minecraft-shaped JavaExec launchers
-//   * report finalizers that render through a separate :benchmark:report
-//     runtime (never on the measured benchmark classpath)
+//   * report finalizers that render through a separate :benchmark:report runtime (never on the
+//     measured benchmark classpath)
 //   * compare + top-level catalog aliases
 //
-// Reporting boundary: benchmark JVMs only write raw JSON + an invocation
-// manifest (build/results/current/<task>.json). Rendering happens in a
-// separate JVM from the resolvable `benchmarkReportRuntime` configuration.
+// Reporting boundary: benchmark JVMs only write raw JSON + an invocation manifest
+// (build/results/current/<task>.json). Rendering happens in a separate JVM from the resolvable
+// `benchmarkReportRuntime` configuration.
 // ---------------------------------------------------------------------------
+
+private fun jsonString(value: String): String =
+    buildString {
+        value.forEach { c ->
+            when (c) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+            }
+        }
+    }
+
+private fun writeEnvironmentSidecar(target: File, startedAtMillis: Long) {
+    fun gitOutput(vararg args: String): String? =
+        try {
+            val process = ProcessBuilder(listOf("git", *args))
+                    .redirectErrorStream(true)
+                    .start()
+            val text = process.inputStream.bufferedReader().readText().trim()
+            if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                null
+            } else if (process.exitValue() == 0) {
+                text
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+    val commit = gitOutput("rev-parse", "HEAD")
+    val dirty = gitOutput("status", "--porcelain")?.isNotEmpty()
+    val runtime = Runtime.getRuntime()
+    val startedAt = Instant.ofEpochMilli(startedAtMillis)
+    val finishedAt = Instant.now()
+
+    fun str(value: String): String = "\"${jsonString(value)}\""
+
+    val json = buildString {
+        append("{\n")
+        append("  \"suiteVersion\": \"2\",\n")
+        append("  \"measurementMethodVersion\": \"transport-v2\",\n")
+        append("  \"timestamp\": ${str(startedAt.toString())},\n")
+        append("  \"startedAt\": ${str(startedAt.toString())},\n")
+        append("  \"finishedAt\": ${str(finishedAt.toString())},\n")
+        append("  \"gitCommit\": ${commit?.let(::str) ?: "null"},\n")
+        append("  \"gitDirty\": ${dirty?.toString() ?: "null"},\n")
+        append("  \"os\": ${str(System.getProperty("os.name", "-"))},\n")
+        append("  \"osVersion\": ${str(System.getProperty("os.version", "-"))},\n")
+        append("  \"arch\": ${str(System.getProperty("os.arch", "-"))},\n")
+        append("  \"availableProcessors\": ${runtime.availableProcessors()},\n")
+        append("  \"jdkVendor\": ${str(System.getProperty("java.vendor", "-"))},\n")
+        append("  \"jdkVersion\": ${str(System.getProperty("java.version", "-"))},\n")
+        append("  \"jvmName\": ${str(System.getProperty("java.vm.name", "-"))},\n")
+        append("  \"jvmVersion\": ${str(System.getProperty("java.vm.version", "-"))},\n")
+        append("  \"maxHeapBytes\": ${runtime.maxMemory()},\n")
+        append("  \"nativeWorkerCount\": 0,\n")
+        append("  \"jmhSidecar\": true\n")
+        append("}\n")
+    }
+    target.parentFile?.mkdirs()
+    target.writeText(json)
+}
+
 
 val REPORT_MAIN = "top.tangge233.netbridge.benchmarkreport.cli.ReportCliMain"
 val COMPARE_MAIN = "top.tangge233.netbridge.benchmarkreport.compare.CompareCliMain"
@@ -32,29 +101,26 @@ plugins {
 description =
     "On-demand performance analysis toolbox (L0 raw FFM .. L4 Minecraft-shaped)."
 
-// Report generation runtime: a separate classpath resolved from
-// :benchmark:report so no report/JTE/Clikt code ever sits on the measured
-// runtime or leaks into production packaging.
+/**
+ * Report generation runtime: a separate classpath resolved from `:benchmark:report` so no
+ * report/JTE/Clikt code ever sits on the measured runtime or leaks into production packaging.
+ */
 val benchmarkReportRuntime by configurations.creating {
     isCanBeConsumed = false
     isCanBeResolved = true
 }
 
-// ---------------------------------------------------------------------------
 // Isolation: this module never participates in a plain root `build`/`check`.
-// ---------------------------------------------------------------------------
 tasks.named("check") {
     enabled = false
 }
 
-// ---------------------------------------------------------------------------
 // JMH default ("normal") profile. Run everything with a stable, forked setup.
-// ---------------------------------------------------------------------------
 val jmhParams = extensions.getByName("jmh") as JmhParameters
 
-// Keep the plugin's JMH version aligned with gradle/libs.versions.toml
-// [versions].jmh (fixed, never dynamic). The catalog accessor for a version
-// that shares its key with a plugin id is not generated, hence the literal.
+// Keep the plugin's JMH version aligned with gradle/libs.versions.toml [versions].jmh (fixed,
+// never dynamic). The catalog accessor for a version that shares its key with a plugin id is not
+// generated, hence the literal.
 jmhParams.jmhVersion.set("1.37")
 jmhParams.includeTests.set(false)
 jmhParams.resultFormat.set("JSON")
@@ -78,11 +144,13 @@ jmhParams.jvmArgsAppend.set(
     )
 )
 
-// ---------------------------------------------------------------------------
-// Benchmark-only native libraries. Never part of production packaging.
-//   runtime probe  : cargo build -p net-bridge-native          (release)
-//   L0 probe crate : cargo build -p net-bridge-benchmark-native (release)
-// ---------------------------------------------------------------------------
+/**
+ * Benchmark-only native libraries. Never part of production packaging.
+ *
+ * runtime probe  : cargo build -p net-bridge-native          (release)
+ *
+ * L0 probe crate : cargo build -p net-bridge-benchmark-native (release)
+ */
 val rustDir = rootProject.layout.projectDirectory.dir("rust")
 
 val runtimeNativeDir = layout.buildDirectory.dir("native/runtime")
@@ -109,8 +177,10 @@ val buildProbeNative = tasks.register<BuildNativeLibrary>("buildProbeNative") {
     outputDir.set(probeNativeDir)
 }
 
-// JMH forks its own JVM, so native paths must be forwarded as -D system
-// properties on the forked process command line.
+/**
+ * JMH forks its own JVM, so native paths must be forwarded as -D system properties on the forked
+ * process command line.
+ */
 fun stagedNativePath(dir: Provider<out Directory>, baseName: String): String =
     dir.get().asFile
             .resolve(NativePlatform.subdir)
@@ -123,10 +193,10 @@ val probeNativeLibPath: String = stagedNativePath(probeNativeDir, "net_bridge_be
 fun reportDirFor(taskName: String): Provider<Directory> =
     layout.buildDirectory.dir("reports/benchmarks/$taskName")
 
-// ---------------------------------------------------------------------------
-// JMH report finalizer: renders build/results/jmh/<task>.json through the
-// standalone :benchmark:report runtime.
-// ---------------------------------------------------------------------------
+/**
+ * JMH report finalizer: renders build/results/jmh/<task>.json through the standalone :benchmark:report
+ * runtime.
+ */
 fun wireJmhReporting(
     jmhTaskName: String,
     jsonFileSub: String = "$jmhTaskName.json",
@@ -143,11 +213,18 @@ fun wireJmhReporting(
 
         val jsonFile = layout.buildDirectory.file("results/jmh/$jsonFileSub")
         val txtFile = layout.buildDirectory.file("results/jmh/$txtFileSub")
+        val envFile = layout.buildDirectory.file("results/jmh/$jmhTaskName.env.json")
         val reportDir = reportDirFor(jmhTaskName)
 
         inputs.file(jsonFile)
         inputs.file(txtFile).optional(true)
         outputs.dir(reportDir)
+
+        // Never mask a failed/partial JMH run: only render when the benchmark itself succeeded and
+        // actually produced its result file.
+        onlyIf {
+            jsonFile.get().asFile.exists() && jmhTask.get().state.failure == null
+        }
 
         argumentProviders.add {
             buildList {
@@ -156,11 +233,16 @@ fun wireJmhReporting(
                 add("--raw"); add(jsonFile.get().asFile.absolutePath)
                 add("--jmh-output"); add(txtFile.get().asFile.absolutePath)
                 add("--report-dir"); add(reportDir.get().asFile.absolutePath)
+                if (envFile.get().asFile.exists()) {
+                    add("--jmh-env"); add(envFile.get().asFile.absolutePath)
+                }
             }
         }
     }
 
     jmhTask.configure {
+        val startedFile = layout.buildDirectory.file("results/jmh/$jmhTaskName.started")
+        val envFile = layout.buildDirectory.file("results/jmh/$jmhTaskName.env.json")
         // Stale result cleanup before running this benchmark task.
         doFirst {
             val json = layout.buildDirectory.file("results/jmh/$jsonFileSub").get().asFile
@@ -169,17 +251,30 @@ fun wireJmhReporting(
             if (json.exists()) json.delete()
             if (txt.exists()) txt.delete()
             if (reportDir.exists()) reportDir.deleteRecursively()
+            envFile.get().asFile.delete()
+            startedFile.get().asFile.delete()
+            startedFile.get().asFile.parentFile?.mkdirs()
+            startedFile.get().asFile.writeText(System.currentTimeMillis().toString())
+        }
+        // Capture execute-time environment/git so the report never substitutes render time for run
+        // time (B-028).
+        doLast {
+            writeEnvironmentSidecar(
+                envFile.get().asFile,
+                startedFile.get().asFile.readText().trim().toLongOrNull()
+                    ?: System.currentTimeMillis()
+            )
         }
         finalizedBy(reportTask)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Manifest-based report finalizer for the non-JMH launchers. The benchmark
-// JVM writes build/results/current/<task>.json (InvocationManifest) after its
-// raw JSON succeeds; the finalizer reads it to render. If the run never
-// produced a manifest (e.g. a failed run), the report step is skipped.
-// ---------------------------------------------------------------------------
+/**
+ * Manifest-based report finalizer for the non-JMH launchers. The benchmark JVM writes
+ * build/results/current/<task>.json (InvocationManifest) after its raw JSON succeeds; the finalizer
+ * reads it to render. If the run never produced a manifest (e.g. a failed run), the report step is
+ * skipped.
+ */
 fun wireManifestReporting(taskName: String) {
     val reportTaskName = "${taskName}Report"
     val manifestFile = layout.buildDirectory.file("results/current/$taskName.json")
@@ -210,16 +305,18 @@ fun wireManifestReporting(taskName: String) {
     }
 }
 
-// Thin JMH wrappers: only override include regex, iteration profile, native
-// dependency and native-path system property. The plugin provides the actual
-// JMH implementation via jmhJar + the JMH runner.
+/**
+ * Thin JMH wrappers: only override include regex, iteration profile, native dependency andnative-path
+ * system property. The plugin provides the actual JMH implementation via jmhJar + theJMH runner.
+ */
 fun registerJmhWrapper(
     taskName: String,
     taskDescription: String,
     includeRegex: String,
     nativeDep: Task? = null,
     nativeSysProps: List<Pair<String, String>> = emptyList(),
-    quick: Boolean = false
+    quick: Boolean = false,
+    gcProfile: Boolean = false
 ) {
     tasks.register<JMHTask>(taskName) {
         group = "benchmark"
@@ -235,6 +332,9 @@ fun registerJmhWrapper(
         includes.set(listOf(includeRegex))
         if (nativeDep != null) {
             dependsOn(nativeDep)
+        }
+        if (gcProfile) {
+            profilers.set(listOf("gc"))
         }
         jvmArgsAppend.set(
             buildList {
@@ -287,8 +387,23 @@ registerJmhWrapper(
 registerJmhWrapper(
     taskName = "jmhArena",
     taskDescription = "Pure-Java FFM allocation microbenchmarks (no native library needed).",
+    includeRegex = ".*Arena.*"
+)
+
+registerJmhWrapper(
+    taskName = "jmhArenaQuick",
+    taskDescription = "Fast L0 pure-Java FFM allocation microbenchmarks (for a quick look only).",
     includeRegex = ".*Arena.*",
     quick = true
+)
+
+registerJmhWrapper(
+    taskName = "jmhAllocation",
+    taskDescription =
+        "L0 pure-Java FFM allocation microbenchmarks with the JMH GC profiler " +
+                "(gc.alloc.rate.norm, allocation rate, GC count/time).",
+    includeRegex = ".*Arena.*",
+    gcProfile = true
 )
 
 registerJmhWrapper(
@@ -323,17 +438,19 @@ tasks.named<JMHTask>("jmhQuick") {
     dependsOn(buildProbeNative)
 }
 
-// ---------------------------------------------------------------------------
 // L2 transport harness (plain JavaExec, no JMH).
-// ---------------------------------------------------------------------------
 val benchmarkTransportProp = providers.gradleProperty("benchmarkTransport")
 val benchmarkCaseProp = providers.gradleProperty("benchmarkCase")
 val benchmarkHostProp = providers.gradleProperty("benchmarkHost")
 val benchmarkPortProp = providers.gradleProperty("benchmarkPort")
 val benchmarkWorkloadProp = providers.gradleProperty("benchmarkWorkload")
 val benchmarkDurationProp = providers.gradleProperty("benchmarkDuration")
-val benchmarkPayloadProp = providers.gradleProperty("benchmarkPayload")
+val benchmarkRttPayloadsProp = providers.gradleProperty("benchmarkRttPayloads")
+        .orElse(providers.gradleProperty("benchmarkPayload"))
 val benchmarkIterationsProp = providers.gradleProperty("benchmarkIterations")
+val benchmarkWorkersProp = providers.gradleProperty("benchmarkWorkers")
+val benchmarkRepetitionsProp = providers.gradleProperty("benchmarkRepetitions")
+val benchmarkSeedProp = providers.gradleProperty("benchmarkSeed")
 
 fun booleanNeedsNativeTransport(raw: String?): Boolean =
     raw.isNullOrBlank()
@@ -388,8 +505,10 @@ fun registerTransportTask(
                 benchmarkHostProp.orNull?.let { add("--host"); add(it) }
                 benchmarkPortProp.orNull?.let { add("--port"); add(it) }
                 benchmarkDurationProp.orNull?.let { add("--duration"); add(it) }
-                benchmarkPayloadProp.orNull?.let { add("--payload"); add(it) }
+                benchmarkRttPayloadsProp.orNull?.let { add("--rtt-payloads"); add(it) }
                 benchmarkIterationsProp.orNull?.let { add("--iterations"); add(it) }
+                benchmarkRepetitionsProp.orNull?.let { add("--repetitions"); add(it) }
+                benchmarkSeedProp.orNull?.let { add("--seed"); add(it) }
                 addAll(extraArgs)
             }
         }
@@ -415,9 +534,7 @@ registerTransportTask(
     "client"
 )
 
-// ---------------------------------------------------------------------------
 // L3B NativeChannel real-integration and L4A Minecraft-shaped traffic.
-// ---------------------------------------------------------------------------
 tasks.register<JavaExec>("channelIntegration") {
     description =
         "L3B NativeChannel->FFM->QUIC/KCP end-to-end benchmark (release native required)."
@@ -444,8 +561,14 @@ tasks.register<JavaExec>("channelIntegration") {
         buildList {
             benchmarkTransportProp.orNull?.let { add("--transport"); add(it) }
             benchmarkCaseProp.orNull?.let { add("--case"); add(it) }
+            benchmarkHostProp.orNull?.let { add("--host"); add(it) }
+            benchmarkPortProp.orNull?.let { add("--port"); add(it) }
             benchmarkDurationProp.orNull?.let { add("--duration"); add(it) }
+            benchmarkRttPayloadsProp.orNull?.let { add("--rtt-payloads"); add(it) }
             benchmarkIterationsProp.orNull?.let { add("--iterations"); add(it) }
+            benchmarkWorkersProp.orNull?.let { add("--workers"); add(it) }
+            benchmarkRepetitionsProp.orNull?.let { add("--repetitions"); add(it) }
+            benchmarkSeedProp.orNull?.let { add("--seed"); add(it) }
         }
     }
 }
@@ -473,6 +596,7 @@ tasks.register<JavaExec>("minecraftTraffic") {
         buildList {
             benchmarkTransportProp.orNull?.let { add("--transport"); add(it) }
             benchmarkWorkloadProp.orNull?.let { add("--workload"); add(it) }
+            benchmarkWorkersProp.orNull?.let { add("--workers"); add(it) }
         }
     }
 }
@@ -508,10 +632,8 @@ tasks.register<JavaExec>("renderMinecraftSession") {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Compare / catalog (pure calculators over already-written JSON results). They
-// run on the :benchmark:report runtime, not the measured benchmark classpath.
-// ---------------------------------------------------------------------------
+// Compare / catalog (pure calculators over already-written JSON results). They run on the
+// `:benchmark:report` runtime, not the measured benchmark classpath.
 tasks.register<JavaExec>("compare") {
     description = "Prints per-row deltas between two result documents (-Pbefore, -Pafter)."
     group = "benchmark"
@@ -548,9 +670,7 @@ tasks.register<JavaExec>("benchmarkReport") {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Aggregate entry point: run every on-demand benchmark layer in one invocation.
-// ---------------------------------------------------------------------------
 val aggregateBenchmarkTasks = listOf(
     "jmh",
     "transportBenchmark",
@@ -565,6 +685,15 @@ tasks.register("benchmarkAll") {
     group = "benchmark"
     dependsOn(aggregateBenchmarkTasks)
     dependsOn("benchmarkReport")
+}
+
+// Measurement layers must not run concurrently: they all bind loopback ports and saturate the same
+// CPU, so overlapping them invalidates every number. Chain the aggregate tasks so each finishes
+// before the next starts.
+aggregateBenchmarkTasks.zipWithNext().forEach { (first, second) ->
+    tasks.named(second) {
+        mustRunAfter(first)
+    }
 }
 
 tasks.named("benchmarkReport") {

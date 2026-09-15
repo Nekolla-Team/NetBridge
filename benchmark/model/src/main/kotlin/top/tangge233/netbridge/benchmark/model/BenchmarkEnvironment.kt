@@ -33,13 +33,24 @@ class BenchmarkEnvironment(
     val rustVersion: String? = null,
     val nativeWorkerCount: Int,
     val nativeLibrary: String? = null,
-    val nativeLibrarySha256: String? = null
+    val nativeLibrarySha256: String? = null,
+    val measurementMethodVersion: String? = null,
+    val cpuModel: String? = null,
+    val logicalCores: Int? = null,
+    val jvmArgs: String? = null,
+    val jvmGc: String? = null,
+    val loadAverage: Double? = null,
+    val containerHint: String? = null,
+    val networkProfile: String? = null
 ) {
 
     private val extraFields = linkedMapOf<String, JsonNode>()
 
     @JsonAnySetter
-    fun readUnknown(name: String, value: JsonNode) {
+    fun readUnknown(
+        name: String,
+        value: JsonNode
+    ) {
         extraFields[name] = value
     }
 
@@ -50,4 +61,5 @@ class BenchmarkEnvironment(
         "BenchmarkEnvironment(timestamp=$timestamp, git=$gitCommit, gitDirty=$gitDirty, " +
                 "os=$os $osVersion/$arch, jdk=$jdkVendor $jdkVersion, " +
                 "nativeWorkerCount=$nativeWorkerCount)"
+
 }

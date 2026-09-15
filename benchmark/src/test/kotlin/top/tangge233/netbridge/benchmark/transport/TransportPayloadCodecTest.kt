@@ -32,29 +32,44 @@ class TransportPayloadCodecTest {
     }
 
     @Test
-    fun reportResponseCarriesByteCount() {
-        val frame = TransportPayloadCodec.encodeReportResponse(
+    fun statsFrameRoundTrips() {
+        val stats = SessionStats(
+            bytesReceived = 987654L,
+            framesReceived = 12L,
+            bytesSent = 111L,
+            framesSent = 3L,
+            corruptFrames = 1L,
+            disorderEvents = 2L,
+            firstSequence = 1L,
+            lastSequence = 14L,
+            startNanos = 100L,
+            endNanos = 200L,
+            failedWrites = 0L
+        )
+        val frame = TransportPayloadCodec.encodeStats(
             UnpooledByteBufAllocator.DEFAULT,
+            FrameType.REPORT_RESPONSE,
             3L,
-            987654L
+            stats
         )
         frame.use {
             assertEquals(FrameType.REPORT_RESPONSE, TransportPayloadCodec.readType(frame))
             assertEquals(3L, TransportPayloadCodec.readSequence(frame))
-            assertEquals(987654L, TransportPayloadCodec.readReportBytes(frame))
+            assertEquals(stats, TransportPayloadCodec.readStats(frame))
         }
     }
 
     @Test
-    fun startBidiCarriesPayloadSize() {
-        val frame = TransportPayloadCodec.encodeStartBidi(
+    fun intPayloadRoundTrips() {
+        val frame = TransportPayloadCodec.encodeIntPayload(
             UnpooledByteBufAllocator.DEFAULT,
+            FrameType.STREAM_START,
             5L,
             65536
         )
         frame.use {
             assertEquals(5L, TransportPayloadCodec.readSequence(frame))
-            assertEquals(65536, TransportPayloadCodec.readBidiPayloadBytes(frame))
+            assertEquals(65536, TransportPayloadCodec.readIntPayload(frame))
         }
     }
 

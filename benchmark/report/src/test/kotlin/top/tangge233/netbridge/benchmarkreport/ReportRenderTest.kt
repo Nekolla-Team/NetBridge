@@ -66,7 +66,7 @@ class ReportRenderTest {
         assertTrue("Host" in scopeKeys)
         assertTrue("Port" in scopeKeys)
         assertTrue("Workers" in scopeKeys)
-        assertTrue("Rtt payload bytes" in scopeKeys)
+        assertTrue("Rtt payloads" in scopeKeys)
 
         val h2 = doc.select("section h2").eachText()
         assertTrue("Connection Latency" in h2)
@@ -125,7 +125,7 @@ class ReportRenderTest {
         val throughputText = throughput.select("tbody tr td").eachText()
         assertTrue(throughputText.contains("69.31 MiB"))
         assertTrue(throughputText.contains("45.70 MiB/s"))
-        assertTrue(throughputText.contains("verified"))
+        assertTrue(throughputText.contains("ok"))
     }
 
     @Test

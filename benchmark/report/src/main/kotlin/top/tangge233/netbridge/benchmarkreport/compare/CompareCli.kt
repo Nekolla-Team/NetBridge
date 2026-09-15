@@ -5,6 +5,7 @@ package top.tangge233.netbridge.benchmarkreport.compare
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.core.main
+import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.types.path
@@ -35,19 +36,29 @@ class CompareCli : CliktCommand(name = "compare") {
         canBeFile = true
     ).required()
 
+    private val force by option(
+        "--force",
+        help = "Allow comparing runs that are not compatible; emits a prominent warning."
+    ).flag()
+
     override fun run() {
-        comparePaths(before, after).forEach(::echo)
+        comparePaths(before, after, force).forEach(::echo)
     }
 
 }
 
-private fun comparePaths(before: Path, after: Path): List<String> =
+private fun comparePaths(before: Path, after: Path, force: Boolean): List<String> =
     compareTexts(
         Files.readString(before, StandardCharsets.UTF_8),
-        Files.readString(after, StandardCharsets.UTF_8)
+        Files.readString(after, StandardCharsets.UTF_8),
+        force
     )
 
-fun compareTexts(beforeText: String, afterText: String): List<String> {
+fun compareTexts(
+    beforeText: String,
+    afterText: String,
+    force: Boolean = false
+): List<String> {
     val beforeIsJmh = JmhJson.looksLikeJmh(beforeText)
     val afterIsJmh = JmhJson.looksLikeJmh(afterText)
     if (beforeIsJmh != afterIsJmh) {
@@ -57,21 +68,33 @@ fun compareTexts(beforeText: String, afterText: String): List<String> {
     }
 
     return if (beforeIsJmh) {
-        compareJmh(JmhJson.read(beforeText), JmhJson.read(afterText))
+        compareJmh(
+            JmhJson.read(beforeText),
+            JmhJson.read(afterText),
+            force
+        )
     } else {
-        compareRunDocuments(beforeText, afterText)
+        compareRunDocuments(beforeText, afterText, force)
     }
 }
 
-private fun compareRunDocuments(beforeText: String, afterText: String): List<String> {
+private fun compareRunDocuments(
+    beforeText: String,
+    afterText: String,
+    force: Boolean
+): List<String> {
     val beforeDoc = BenchmarkJson.readRunDocument(beforeText)
     val afterDoc = BenchmarkJson.readRunDocument(afterText)
     if (beforeDoc.suite != afterDoc.suite) {
         throw UsageError(
-            "Cannot compare documents with different suites: " + "'${beforeDoc.suite}' vs '${afterDoc.suite}'."
+            "Cannot compare documents with different suites: '${beforeDoc.suite}' vs '${afterDoc.suite}'."
         )
     }
-    return when (beforeDoc) {
+
+    val compatibility = runDocumentCompatibility(beforeDoc, afterDoc)
+    rejectIncompatible(compatibility.hard, force)
+
+    val body = when (beforeDoc) {
         is TransportRunDocument ->
             compareTransport(beforeDoc, afterDoc as TransportRunDocument)
 
@@ -82,7 +105,190 @@ private fun compareRunDocuments(beforeText: String, afterText: String): List<Str
             "Comparison is not supported for suite '${beforeDoc.suite}'."
         )
     }
+    return compatibilityLines(compatibility) + body
 }
+
+private fun rejectIncompatible(hard: List<String>, force: Boolean) {
+    if (hard.isNotEmpty() && !force) {
+        throw UsageError(
+            "Incompatible runs: ${hard.joinToString("; ")}. " +
+                "Re-run with --force to compare anyway."
+        )
+    }
+}
+
+private fun compatibilityLines(compatibility: Compatibility): List<String> =
+    buildList {
+        if (compatibility.hard.isNotEmpty()) {
+            add(
+                "WARNING: forced comparison of incompatible runs: ${
+                    compatibility.hard.joinToString(
+                        "; "
+                    )
+                }"
+            )
+        }
+        compatibility.warnings.forEach { add("warning: $it") }
+    }
+
+private data class Compatibility(
+    val hard: List<String>,
+    val warnings: List<String>
+)
+
+private fun runDocumentCompatibility(
+    before: RunDocument,
+    after: RunDocument
+): Compatibility {
+    val hard = mutableListOf<String>()
+    val warnings = mutableListOf<String>()
+
+    val beforeEnv = environmentOf(before)
+    val afterEnv = environmentOf(after)
+
+    if (beforeEnv != null && afterEnv != null) {
+        if (beforeEnv.measurementMethodVersion != afterEnv.measurementMethodVersion) {
+            hard += "measurement method version '${beforeEnv.measurementMethodVersion}' vs '${afterEnv.measurementMethodVersion}'"
+        }
+
+        if (beforeEnv.suiteVersion != afterEnv.suiteVersion) {
+            hard += "suite version '${beforeEnv.suiteVersion}' vs '${afterEnv.suiteVersion}'"
+        }
+
+        addEnvironmentWarnings(beforeEnv, afterEnv, warnings)
+    }
+
+    if (before is TransportRunDocument && after is TransportRunDocument) {
+        val beforeScopes = before.results.mapNotNull(::cpuScopeOf).toSet()
+        val afterScopes = after.results.mapNotNull(::cpuScopeOf).toSet()
+
+        if (beforeScopes != afterScopes) {
+            hard += "CPU scope $beforeScopes vs $afterScopes"
+        }
+
+        if (before.configuration.transports.toSet() != after.configuration.transports.toSet()) {
+            hard += "transports ${before.configuration.transports} vs ${after.configuration.transports}"
+        }
+
+        if (before.configuration.cases.toSet() != after.configuration.cases.toSet()) {
+            hard += "cases ${before.configuration.cases} vs ${after.configuration.cases}"
+        }
+
+        addConfigWarning(
+            "workers",
+            before.configuration.workers,
+            after.configuration.workers,
+            warnings
+        )
+        addConfigWarning(
+            "throughput duration",
+            before.configuration.throughputDurationMillis,
+            after.configuration.throughputDurationMillis,
+            warnings
+        )
+        addConfigWarning(
+            "connect iterations",
+            before.configuration.connectIterations,
+            after.configuration.connectIterations,
+            warnings
+        )
+        addConfigWarning(
+            "rtt iterations",
+            before.configuration.rttMeasuredIterations,
+            after.configuration.rttMeasuredIterations,
+            warnings
+        )
+        addConfigWarning(
+            "repetitions",
+            before.configuration.repetitions,
+            after.configuration.repetitions,
+            warnings
+        )
+    }
+
+    return Compatibility(hard, warnings)
+}
+
+private fun environmentOf(doc: RunDocument): BenchmarkEnvironment? =
+    when (doc) {
+        is TransportRunDocument -> doc.environment
+        is MinecraftShapedRunDocument -> doc.environment
+        else -> null
+    }
+
+private fun addEnvironmentWarnings(
+    before: BenchmarkEnvironment,
+    after: BenchmarkEnvironment,
+    warnings: MutableList<String>
+) {
+    addConfigWarning(
+        "git commit",
+        before.gitCommit,
+        after.gitCommit,
+        warnings
+    )
+    addConfigWarning(
+        "CPU model",
+        before.cpuModel,
+        after.cpuModel,
+        warnings
+    )
+    addConfigWarning(
+        "JDK version",
+        before.jdkVersion,
+        after.jdkVersion,
+        warnings
+    )
+    addConfigWarning(
+        "OS",
+        before.os,
+        after.os,
+        warnings
+    )
+    addConfigWarning(
+        "OS version",
+        before.osVersion,
+        after.osVersion,
+        warnings
+    )
+    addConfigWarning(
+        "arch",
+        before.arch,
+        after.arch,
+        warnings
+    )
+    addConfigWarning(
+        "native library SHA",
+        before.nativeLibrarySha256,
+        after.nativeLibrarySha256,
+        warnings
+    )
+    addConfigWarning(
+        "network profile",
+        before.networkProfile,
+        after.networkProfile,
+        warnings
+    )
+}
+
+private fun <T> addConfigWarning(
+    label: String,
+    before: T,
+    after: T,
+    warnings: MutableList<String>
+) {
+    if (before != after) {
+        warnings += "$label changed: $before -> $after"
+    }
+}
+
+private fun cpuScopeOf(row: TransportMeasurement): String? =
+    when (row) {
+        is LatencyMeasurementResult -> row.cpuScope
+        is ThroughputMeasurementResult -> row.cpuScope
+        is BidirectionalMeasurementResult -> row.cpuScope
+        is LoadedLatencyMeasurementResult -> row.cpuScope
+    }
 
 private fun compareTransport(
     before: TransportRunDocument,
@@ -186,13 +392,21 @@ private fun <T> observations(
 
 private fun compareJmh(
     before: List<JmhResultDto>,
-    after: List<JmhResultDto>
+    after: List<JmhResultDto>,
+    force: Boolean = false
 ): List<String> {
+    val hard = jmhCompatibility(before, after)
+    rejectIncompatible(hard, force)
+    val prefix = if (hard.isNotEmpty()) {
+        listOf("WARNING: forced comparison of incompatible JMH runs: ${hard.joinToString("; ")}")
+    } else {
+        emptyList()
+    }
+
     val beforeMap = before.associateBy { jmhRowKey(it) }
     val afterMap = after.associateBy { jmhRowKey(it) }
-    val defs = MetricDefs.jmh
 
-    return buildList {
+    val body = buildList {
         beforeMap.entries
             .sortedBy { it.key }
             .forEach { (key, beforeRow) ->
@@ -202,6 +416,7 @@ private fun compareJmh(
                     return@forEach
                 }
 
+                val defs = MetricDefs.jmhFor(beforeRow.primaryMetric?.scoreUnit)
                 val beforeObs = observations(defs, beforeRow, key)
                 val afterObs = observations(defs, afterRow, key)
                 beforeObs
@@ -227,17 +442,48 @@ private fun compareJmh(
                 }
             }
     }
+    return prefix + body
+}
+
+private fun jmhCompatibility(
+    before: List<JmhResultDto>,
+    after: List<JmhResultDto>
+): List<String> {
+    val issues = mutableListOf<String>()
+    val modes = (before.map { it.mode } + after.map { it.mode }).distinct()
+    if (modes.size > 1) {
+        issues += "mode ${modes.joinToString()}"
+    }
+    val units = (before.map { it.primaryMetric?.scoreUnit } +
+        after.map { it.primaryMetric?.scoreUnit }).distinct()
+    if (units.size > 1) {
+        issues += "score unit ${units.joinToString()}"
+    }
+    val threads = (before.map { it.threads } + after.map { it.threads }).distinct()
+    if (threads.size > 1) {
+        issues += "threads ${threads.joinToString()}"
+    }
+    return issues
 }
 
 private fun jmhRowKey(row: JmhResultDto): String =
-    if (row.params.isEmpty()) {
-        row.benchmark
-    } else {
-        "${row.benchmark} ${
-            row.params.entries
-                .sortedBy { it.key }
-                .joinToString(", ") { (k, v) -> "$k=$v" }
-        }"
+    buildString {
+        append(row.benchmark)
+        append(" [")
+        append(row.mode)
+        append(' ')
+        append(row.primaryMetric?.scoreUnit ?: "")
+        append(" threads=")
+        append(row.threads)
+        append(']')
+        if (row.params.isNotEmpty()) {
+            append(' ')
+            append(
+                row.params.entries
+                    .sortedBy { it.key }
+                    .joinToString(", ") { (k, v) -> "$k=$v" }
+            )
+        }
     }
 
 private fun transportRowKey(row: TransportMeasurement): String =

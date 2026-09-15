@@ -51,6 +51,7 @@ internal fun environmentEntries(env: BenchmarkEnvironment): List<KeyValue> =
         }
 
         put("suiteVersion", env.suiteVersion)
+        put("measurementMethodVersion", env.measurementMethodVersion)
         put("timestamp", env.timestamp.toString())
         put("gitCommit", env.gitCommit)
         put("gitDirty", env.gitDirty?.toString())
@@ -58,11 +59,18 @@ internal fun environmentEntries(env: BenchmarkEnvironment): List<KeyValue> =
         put("osVersion", env.osVersion)
         put("arch", env.arch)
         put("availableProcessors", env.availableProcessors.toString())
+        put("cpuModel", env.cpuModel)
+        put("logicalCores", env.logicalCores?.toString())
         put("jdkVendor", env.jdkVendor)
         put("jdkVersion", env.jdkVersion)
         put("jvmName", env.jvmName)
         put("jvmVersion", env.jvmVersion)
+        put("jvmArgs", env.jvmArgs)
+        put("jvmGc", env.jvmGc)
         put("maxHeapBytes", env.maxHeapBytes.toString())
+        put("loadAverage", env.loadAverage?.toString())
+        put("containerHint", env.containerHint)
+        put("networkProfile", env.networkProfile)
         put("rustVersion", env.rustVersion)
         put("nativeWorkerCount", env.nativeWorkerCount.toString())
         put("nativeLibrary", env.nativeLibrary)
@@ -81,15 +89,17 @@ internal fun transportConfigurationEntries(
         KeyValue("host", config.host),
         KeyValue("port", config.port.toString()),
         KeyValue("workers", config.workers.toString()),
-        KeyValue("rttPayloadBytes", config.rttPayloadBytes.toString()),
+        KeyValue("rttPayloads", config.rttPayloads.pretty()),
         KeyValue("throughputDurationMillis", config.throughputDurationMillis.toString()),
         KeyValue("connectIterations", config.connectIterations.toString()),
         KeyValue("rttMeasuredIterations", config.rttMeasuredIterations.toString()),
         KeyValue("startServer", config.startServer.toString()),
+        KeyValue("repetitions", config.repetitions.toString()),
+        KeyValue("seed", config.seed.toString()),
         KeyValue("nativeLibrary", config.nativeLibrary ?: HumanUnits.MISSING)
     )
 
-internal fun List<String>.pretty(): String =
+internal fun List<*>.pretty(): String =
     joinToString(
         prefix = "[",
         separator = ", ",

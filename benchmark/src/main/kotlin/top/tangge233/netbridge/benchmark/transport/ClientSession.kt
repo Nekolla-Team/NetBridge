@@ -8,15 +8,21 @@ import io.netty.channel.ChannelInitializer
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 private const val WRITE_WINDOW = 16
 private const val DEFAULT_PING_TIMEOUT_MILLIS = 5_000L
+private const val ACK_TIMEOUT_MILLIS = 5_000L
 private const val ACK_WINDOW_BYTES = 4L * 1024 * 1024
 
 class ClientSession private constructor(
     val channel: Channel,
     private val pendingPings: MutableMap<Long, PendingPing>,
-    private val reportResponse: CompletableFuture<Long>,
+    private val pendingReports: MutableMap<Long, CompletableFuture<SessionStats>>,
+    private val pendingStreamStops: MutableMap<Long, CompletableFuture<SessionStats>>,
+    private val pendingServerSends: MutableMap<Long, CompletableFuture<ServerSendResult>>,
+    private val latestStats: AtomicReference<SessionStats>,
+    private val inboundDataHook: AtomicReference<((Long) -> Unit)?>,
     private val sentBytesCounter: AtomicLong,
     private val receivedBytesCounter: AtomicLong,
     private val corruptFramesCounter: AtomicLong,
@@ -25,12 +31,13 @@ class ClientSession private constructor(
 
     private val streamStop = AtomicBoolean(true)
     private val streamFinished = AtomicBoolean(true)
-    private val nextSeq = AtomicLong(1)
+    private val nextControlSeq = AtomicLong(1)
+    private val nextDataSeq = AtomicLong(1)
 
     @Volatile
     private var streamOutcome: CompletableFuture<StreamOutcome> =
         CompletableFuture.completedFuture(
-            StreamOutcome(0L, 0L)
+            StreamOutcome(0L, 0L, StreamStatus.OK)
         )
     private var streamPayload: Int = 0
     private var outstanding: Int = 0
@@ -39,6 +46,34 @@ class ClientSession private constructor(
     private var streamStartNanos: Long = 0L
     private var streamEndNanos: Long = 0L
     private var streamSentBytes: Long = 0L
+
+    @Volatile
+    private var streamError: String? = null
+
+    val serverStats: SessionStats
+        get() = latestStats.get()
+
+    /** Installs (or clears) a callback invoked with each inbound DATA frame's arrival nanoTime. */
+    fun onInboundData(hook: ((Long) -> Unit)?) {
+        inboundDataHook.set(hook)
+    }
+
+    /**
+     * Writes one workload DATA frame without blocking, using the session's monotonic data
+     * sequence space. Returns the Netty write future so callers can bound outstanding writes.
+     */
+    fun writeWorkloadData(payloadBytes: Int): io.netty.channel.ChannelFuture {
+        val seq = nextDataSequence()
+        sentBytesCounter.addAndGet(payloadBytes.toLong())
+        return channel.writeAndFlush(
+            TransportPayloadCodec.encodeFrame(
+                channel.alloc(),
+                FrameType.DATA,
+                seq,
+                payloadBytes
+            )
+        )
+    }
 
     val clientSentBytes: Long
         get() = sentBytesCounter.get()
@@ -53,11 +88,36 @@ class ClientSession private constructor(
         get() = disorderCounter.get()
 
     fun ping(payloadBytes: Int): Long {
-        val seq = nextSequence()
+        return try {
+            pingAsync(payloadBytes).get(
+                DEFAULT_PING_TIMEOUT_MILLIS + 1_000L,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (e: TimeoutException) {
+            throw IllegalStateException("ping timed out (transport stalled)", e)
+        } catch (e: ExecutionException) {
+            throw IllegalStateException("ping failed", e.cause)
+        }
+    }
+
+    /**
+     * Issues a ping without blocking; the returned future completes with the round-trip nanos.
+     * Callers may keep multiple pings in flight on an absolute schedule to avoid coordinated
+     * omission (B-013).
+     */
+    fun pingAsync(payloadBytes: Int): CompletableFuture<Long> {
+        val seq = nextControlSequence()
         val sentNanos = System.nanoTime()
         val pending = PendingPing(sentNanos)
-
+        pending.timeoutTask = channel.eventLoop().schedule({
+            if (pendingPings.remove(seq) != null) {
+                pending.response.completeExceptionally(
+                    IllegalStateException("ping timed out (transport stalled)")
+                )
+            }
+        }, DEFAULT_PING_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
         pendingPings[seq] = pending
+
         channel.writeAndFlush(
             TransportPayloadCodec.encodeFrame(
                 channel.alloc(),
@@ -65,23 +125,20 @@ class ClientSession private constructor(
                 seq,
                 payloadBytes
             )
-        )
-
-        return try {
-            pending.response.get(
-                DEFAULT_PING_TIMEOUT_MILLIS,
-                TimeUnit.MILLISECONDS
-            )
-        } catch (e: TimeoutException) {
-            pendingPings.remove(seq)
-            throw IllegalStateException("ping timed out (transport stalled)", e)
-        } catch (e: ExecutionException) {
-            pendingPings.remove(seq)
-            throw IllegalStateException("ping failed", e.cause)
+        ).addListener { future ->
+            if (!future.isSuccess) {
+                pendingPings.remove(seq)
+                pending.timeoutTask?.cancel(false)
+                pending.response.completeExceptionally(future.cause())
+            }
         }
+
+        return pending.response
     }
 
-    private fun nextSequence(): Long = nextSeq.getAndIncrement()
+    private fun nextControlSequence(): Long = nextControlSeq.getAndIncrement()
+
+    private fun nextDataSequence(): Long = nextDataSeq.getAndIncrement()
 
     fun startStreaming(payloadBytes: Int): CompletableFuture<StreamOutcome> {
         check(streamFinished.get()) { "stream already running" }
@@ -91,21 +148,20 @@ class ClientSession private constructor(
         streamFinished.set(false)
         bytesSinceAck = 0L
         awaitingAck = false
+        outstanding = 0
+        streamSentBytes = 0L
+        streamError = null
+        streamStartNanos = System.nanoTime()
 
         val outcome = CompletableFuture<StreamOutcome>()
         streamOutcome = outcome
-        channel.eventLoop().execute { streamLoop() }
+        channel.eventLoop().execute { pump() }
         return outcome
     }
 
     fun stopStreaming() {
         streamStop.set(true)
         channel.eventLoop().execute { pump() }
-    }
-
-    private fun streamLoop() {
-        streamStartNanos = System.nanoTime()
-        pump()
     }
 
     private fun pump() {
@@ -134,7 +190,7 @@ class ClientSession private constructor(
     }
 
     private fun sendNext() {
-        val seq = nextSequence()
+        val seq = nextDataSequence()
         outstanding++
         val payload = streamPayload
         streamSentBytes += payload
@@ -152,15 +208,13 @@ class ClientSession private constructor(
                 if (future.isSuccess) {
                     pump()
                 } else {
-                    streamStop.set(true)
-                    pump()
+                    failStream("data write failed: ${future.cause()}")
                 }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
             outstanding--
             frame.release()
-            streamStop.set(true)
-            pump()
+            failStream("data write threw: $t")
         }
     }
 
@@ -171,11 +225,19 @@ class ClientSession private constructor(
 
         awaitingAck = true
         bytesSinceAck = 0L
-        val seq = nextSequence()
-        pendingPings[seq] = PendingPing(System.nanoTime()) {
+        val seq = nextControlSequence()
+        val pending = PendingPing(System.nanoTime())
+        pending.onAck = {
             awaitingAck = false
             pump()
         }
+        pending.timeoutTask = channel.eventLoop().schedule({
+            if (pendingPings.remove(seq) != null) {
+                failStream("stream ACK timed out")
+            }
+        }, ACK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+        pendingPings[seq] = pending
+
         channel.writeAndFlush(
             TransportPayloadCodec.encodeFrame(
                 channel.alloc(),
@@ -183,7 +245,21 @@ class ClientSession private constructor(
                 seq,
                 0
             )
-        )
+        ).addListener { future ->
+            if (!future.isSuccess) {
+                pendingPings.remove(seq)
+                pending.timeoutTask?.cancel(false)
+                failStream("stream ACK write failed: ${future.cause()}")
+            }
+        }
+    }
+
+    private fun failStream(reason: String) {
+        if (streamError == null) {
+            streamError = reason
+        }
+        streamStop.set(true)
+        channel.eventLoop().execute { pump() }
     }
 
     private fun finishStream() {
@@ -192,34 +268,98 @@ class ClientSession private constructor(
         }
 
         streamEndNanos = System.nanoTime()
+        val error = streamError
         streamOutcome.complete(
             StreamOutcome(
                 streamSentBytes,
-                streamEndNanos - streamStartNanos
+                streamEndNanos - streamStartNanos,
+                if (error == null) StreamStatus.OK else StreamStatus.FAILED,
+                error
             )
         )
     }
 
-    fun requestReport(): CompletableFuture<Long> {
+    fun requestReport(): CompletableFuture<SessionStats> {
+        val seq = nextControlSequence()
+        val future = CompletableFuture<SessionStats>()
+
+        pendingReports[seq] = future
         channel.writeAndFlush(
             TransportPayloadCodec.encodeFrame(
                 channel.alloc(),
                 FrameType.REPORT_REQUEST,
-                nextSequence(),
+                seq,
                 0
             )
-        )
-        return reportResponse
+        ).addListener { f ->
+            if (!f.isSuccess) {
+                pendingReports.remove(seq)
+                future.completeExceptionally(f.cause())
+            }
+        }
+        return future
     }
 
     fun startServerStream(payloadBytes: Int) {
         channel.writeAndFlush(
-            TransportPayloadCodec.encodeStartBidi(
+            TransportPayloadCodec.encodeIntPayload(
                 channel.alloc(),
-                nextSequence(),
+                FrameType.STREAM_START,
+                nextControlSequence(),
                 payloadBytes
             )
         )
+    }
+
+    fun stopServerStream(): CompletableFuture<SessionStats> {
+        val seq = nextControlSequence()
+        val future = CompletableFuture<SessionStats>()
+
+        pendingStreamStops[seq] = future
+        channel.writeAndFlush(
+            TransportPayloadCodec.encodeFrame(
+                channel.alloc(),
+                FrameType.STREAM_STOP,
+                seq,
+                0
+            )
+        ).addListener { f ->
+            if (!f.isSuccess) {
+                pendingStreamStops.remove(seq)
+                future.completeExceptionally(f.cause())
+            }
+        }
+        return future
+    }
+
+    /**
+     * Asks the server to emit a burst of [count] frames of [payloadBytes] bytes on an
+     * absolute [intervalNanos] schedule and resolves once the server reports completion.
+     */
+    fun serverSend(
+        payloadBytes: Int,
+        count: Int,
+        intervalNanos: Long
+    ): CompletableFuture<ServerSendResult> {
+        val seq = nextControlSequence()
+        val future = CompletableFuture<ServerSendResult>()
+
+        pendingServerSends[seq] = future
+        channel.writeAndFlush(
+            TransportPayloadCodec.encodeServerSend(
+                channel.alloc(),
+                seq,
+                payloadBytes,
+                count,
+                intervalNanos
+            )
+        ).addListener { f ->
+            if (!f.isSuccess) {
+                pendingServerSends.remove(seq)
+                future.completeExceptionally(f.cause())
+            }
+        }
+        return future
     }
 
     override fun close() {
@@ -229,21 +369,44 @@ class ClientSession private constructor(
 
     data class StreamOutcome(
         val bytesWritten: Long,
-        val wallNanos: Long
-    )
+        val wallNanos: Long,
+        val status: StreamStatus,
+        val error: String? = null
+    ) {
+
+        val failed: Boolean
+            get() = status == StreamStatus.FAILED
+
+    }
+
+    enum class StreamStatus {
+
+        OK,
+        FAILED
+
+    }
 
     private class PendingPing(
-        val sentNanos: Long,
-        val onAck: (() -> Unit)? = null
+        val sentNanos: Long
     ) {
 
         val response: CompletableFuture<Long> = CompletableFuture()
+
+        @Volatile
+        var onAck: (() -> Unit)? = null
+
+        @Volatile
+        var timeoutTask: ScheduledFuture<*>? = null
 
     }
 
     private class InboundHandler(
         private val pendingPings: MutableMap<Long, PendingPing>,
-        private val reportResponse: CompletableFuture<Long>,
+        private val pendingReports: MutableMap<Long, CompletableFuture<SessionStats>>,
+        private val pendingStreamStops: MutableMap<Long, CompletableFuture<SessionStats>>,
+        private val pendingServerSends: MutableMap<Long, CompletableFuture<ServerSendResult>>,
+        private val latestStats: AtomicReference<SessionStats>,
+        private val inboundDataHook: AtomicReference<((Long) -> Unit)?>,
         private val clientReceivedBytes: AtomicLong,
         private val corruptInboundFrames: AtomicLong,
         private val disorderEvents: AtomicLong
@@ -258,13 +421,26 @@ class ClientSession private constructor(
                 val type = TransportPayloadCodec.readType(msg)
                 val seq = TransportPayloadCodec.readSequence(msg)
                 when (type) {
-                    FrameType.PING -> onPing(seq, msg)
+                    FrameType.PONG -> onPong(seq, msg)
 
                     FrameType.DATA -> onData(seq, msg)
 
-                    FrameType.REPORT_RESPONSE -> reportResponse.complete(
-                        TransportPayloadCodec.readReportBytes(msg)
-                    )
+                    FrameType.REPORT_RESPONSE -> {
+                        val stats = TransportPayloadCodec.readStats(msg)
+                        latestStats.set(stats)
+                        pendingReports.remove(seq)?.complete(stats)
+                    }
+
+                    FrameType.STREAM_STOPPED -> {
+                        val stats = TransportPayloadCodec.readStats(msg)
+                        latestStats.set(stats)
+                        pendingStreamStops.remove(seq)?.complete(stats)
+                    }
+
+                    FrameType.SERVER_SEND_COMPLETE -> {
+                        val result = TransportPayloadCodec.readServerSendComplete(msg)
+                        pendingServerSends.remove(seq)?.complete(result)
+                    }
 
                     else -> {
                     }
@@ -274,9 +450,10 @@ class ClientSession private constructor(
             }
         }
 
-        private fun onPing(seq: Long, frame: ByteBuf) {
+        private fun onPong(seq: Long, frame: ByteBuf) {
             val pending = pendingPings.remove(seq) ?: return
 
+            pending.timeoutTask?.cancel(false)
             val delta = System.nanoTime() - pending.sentNanos
             if (!TransportPayloadCodec.verifyPayload(frame, seq)) {
                 corruptInboundFrames.incrementAndGet()
@@ -302,6 +479,7 @@ class ClientSession private constructor(
             }
             lastInboundSequence = seq
             clientReceivedBytes.addAndGet(payload.toLong())
+            inboundDataHook.get()?.invoke(System.nanoTime())
         }
 
     }
@@ -315,14 +493,23 @@ class ClientSession private constructor(
             timeoutMillis: Long
         ): ClientSession {
             val pending: MutableMap<Long, PendingPing> = ConcurrentHashMap()
-            val report = CompletableFuture<Long>()
+            val reports: MutableMap<Long, CompletableFuture<SessionStats>> = ConcurrentHashMap()
+            val stops: MutableMap<Long, CompletableFuture<SessionStats>> = ConcurrentHashMap()
+            val serverSends: MutableMap<Long, CompletableFuture<ServerSendResult>> =
+                ConcurrentHashMap()
+            val latestStats = AtomicReference(SessionStats.EMPTY)
+            val inboundHook = AtomicReference<((Long) -> Unit)?>(null)
             val sent = AtomicLong()
             val received = AtomicLong()
             val corrupt = AtomicLong()
             val disorder = AtomicLong()
             val handler = InboundHandler(
                 pending,
-                report,
+                reports,
+                stops,
+                serverSends,
+                latestStats,
+                inboundHook,
                 received,
                 corrupt,
                 disorder
@@ -353,7 +540,11 @@ class ClientSession private constructor(
             return ClientSession(
                 channel,
                 pending,
-                report,
+                reports,
+                stops,
+                serverSends,
+                latestStats,
+                inboundHook,
                 sent,
                 received,
                 corrupt,

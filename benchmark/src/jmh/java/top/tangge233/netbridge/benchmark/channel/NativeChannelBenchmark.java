@@ -48,9 +48,12 @@ public class NativeChannelBenchmark {
 
     @Benchmark
     public void readAutoRead(ChannelState s, Blackhole bh) {
+        if (!s.channel.config().isAutoRead()) {
+            s.setAutoReadOnLoop(true);
+        }
         var before = s.counting.delivered.get();
+
         s.connection.push(s.pushChunk);
-        s.readOnLoop();
         bh.consume(s.awaitDelivered(before + s.size));
     }
 
@@ -60,6 +63,7 @@ public class NativeChannelBenchmark {
             s.setAutoReadOnLoop(false);
         }
         var before = s.counting.delivered.get();
+
         s.connection.push(s.pushChunk);
         s.readOnLoop();
         bh.consume(s.awaitDelivered(before + s.size));
@@ -72,12 +76,16 @@ public class NativeChannelBenchmark {
         var chunk = s.master.retainedDuplicate();
         var future = s.channel.writeAndFlush(chunk);
         var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+
         while (s.connection.wouldBlockWrites() == baseline
-                && System.nanoTime() < deadline) {
+                && System.nanoTime() < deadline
+        ) {
             Thread.onSpinWait();
         }
+
         s.connection.setWriteWouldBlock(false);
         s.connection.makeWritable();
+
         future.awaitUninterruptibly(5, TimeUnit.SECONDS);
         bh.consume(s.connection.wouldBlockWrites());
     }
@@ -113,10 +121,15 @@ public class NativeChannelBenchmark {
                             pattern[i] = (byte) (i * 31)
                     );
             pushChunk = pattern;
-            master = Unpooled.buffer(size);
+            master = Unpooled.directBuffer(size);
             master.writeBytes(pattern);
-            // Arm the read path once, on the event loop: NativeChannel drains inline
-            // from read()/doBeginRead(), so it must not run on the benchmark thread.
+            if (!master.isDirect()) {
+                throw new IllegalStateException(
+                        "writeDirectByteBuf fixture must use a direct ByteBuf"
+                );
+            }
+            // Arm the read path once, on the event loop: NativeChannel drains inline from
+            // read()/doBeginRead(), so it must not run on the benchmark thread.
             readOnLoop();
         }
 

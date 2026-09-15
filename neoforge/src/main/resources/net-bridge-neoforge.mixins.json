@@ -8,6 +8,8 @@
   ],
   "client": [
     "ClientboundStatusResponsePacketMixin",
+    "ClientHandshakePacketListenerImplMixin",
+    "ClientPacketListenerMixin",
     "ConnectionMixin",
     "ConnectScreenMixin",
     "DebugScreenOverlayMixin",

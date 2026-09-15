@@ -93,7 +93,7 @@ data class StatusValue(
     val detail: String? = null
 ) : ReportValue {
 
-    override fun text(): String = if (ok) "verified" else "MISMATCH"
+    override fun text(): String = if (ok) "ok" else "MISMATCH"
 
     override val raw: String? = detail
 

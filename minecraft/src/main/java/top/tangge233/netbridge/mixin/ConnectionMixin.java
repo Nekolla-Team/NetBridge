@@ -27,15 +27,19 @@ public abstract class ConnectionMixin {
             InetSocketAddress address,
             boolean useEpoll,
             Connection connection,
-            CallbackInfoReturnable<ChannelFuture> cir
+            CallbackInfoReturnable<? super ChannelFuture> cir
     ) {
+        var bypass = AccelerationInterceptionScope.isVanillaConnectBypass()
+                || AccelerationInterceptionScope.isAcceleratedConnectInProgress();
         if (MinecraftBenchmarkRecorder.enabled()) {
-            MinecraftBenchmarkRecorder.get().connectRequested(address);
+            if (bypass) {
+                MinecraftBenchmarkRecorder.get().connectAttempt(address, "accelerated-fallback");
+            } else {
+                MinecraftBenchmarkRecorder.get().beginSession(address);
+            }
         }
 
-        if (AccelerationInterceptionScope.isVanillaConnectBypass()
-                || AccelerationInterceptionScope.isAcceleratedConnectInProgress()
-        ) {
+        if (bypass) {
             return;
         }
 
@@ -63,7 +67,7 @@ public abstract class ConnectionMixin {
             InetSocketAddress address,
             boolean useEpoll,
             Connection connection,
-            CallbackInfoReturnable<ChannelFuture> cir
+            CallbackInfoReturnable<? extends ChannelFuture> cir
     ) {
         if (!MinecraftBenchmarkRecorder.enabled()) {
             return;

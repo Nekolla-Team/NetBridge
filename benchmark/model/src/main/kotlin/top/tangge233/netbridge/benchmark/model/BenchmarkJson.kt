@@ -21,11 +21,11 @@ import java.nio.file.StandardCopyOption
 object BenchmarkJson {
 
     val mapper: ObjectMapper = JsonMapper.builder()
-        .addModule(KotlinModule.Builder().build())
-        .changeDefaultPropertyInclusion {
-            it.withValueInclusion(JsonInclude.Include.NON_NULL)
-        }
-        .build()
+            .addModule(KotlinModule.Builder().build())
+            .changeDefaultPropertyInclusion {
+                it.withValueInclusion(JsonInclude.Include.NON_NULL)
+            }
+            .build()
 
     fun writeString(value: Any): String = mapper.writeValueAsString(value)
 
@@ -62,35 +62,42 @@ object BenchmarkJson {
         return readNode(text)
     }
 
+    /** Reads a standalone environment sidecar (e.g. the JMH execute-time snapshot). */
+    fun readEnvironment(path: Path): BenchmarkEnvironment =
+        readEnvironment(readNode(path))
+
     /**
      * Reads any persisted run document and returns its typed envelope. The concrete type is
      * chosen from the top-level {@code suite} field; transport measurement rows are dispatched
      * on their existing {@code name} field (no schema discriminator is added).
      */
-    fun readRunDocument(path: Path): RunDocument = readRunDocument(readNode(path))
+    fun readRunDocument(path: Path): RunDocument =
+        readRunDocument(readNode(path))
 
-    fun readRunDocument(text: String): RunDocument = readRunDocument(readNode(text))
+    fun readRunDocument(text: String): RunDocument =
+        readRunDocument(readNode(text))
 
-    private fun readRunDocument(root: JsonNode): RunDocument {
-        val suite = root.get("suite")?.asString()
-            ?: throw IOException("no suite field in document")
+    private fun readRunDocument(root: JsonNode): RunDocument =
+        (root.get("suite")?.asString() ?: throw IOException("no suite field in document")).let {
+            when (it) {
+                BenchmarkSuite.TRANSPORT.id,
+                BenchmarkSuite.CHANNEL.id ->
+                    TransportRunDocument(
+                        suite = it,
+                        environment = readEnvironment(root.path("environment")),
+                        configuration = readConfiguration(root.path("configuration")),
+                        results = readTransportMeasurements(root.path("results"))
+                    )
 
-        return when (suite) {
-            BenchmarkSuite.TRANSPORT.id,
-            BenchmarkSuite.CHANNEL.id -> TransportRunDocument(
-                suite = suite,
-                environment = readEnvironment(root.path("environment")),
-                configuration = readConfiguration(root.path("configuration")),
-                results = readTransportMeasurements(root.path("results"))
-            )
+                BenchmarkSuite.MINECRAFT_SHAPED.id ->
+                    root.toValue<MinecraftShapedRunDocument>()
 
-            BenchmarkSuite.MINECRAFT_SHAPED.id -> root.toValue<MinecraftShapedRunDocument>()
+                BenchmarkSuite.MINECRAFT.id ->
+                    root.toValue<MinecraftSessionRunDocument>()
 
-            BenchmarkSuite.MINECRAFT.id -> root.toValue<MinecraftSessionRunDocument>()
-
-            else -> throw IOException("unsupported suite '$suite' in document")
+                else -> throw IOException("unsupported suite '$it' in document")
+            }
         }
-    }
 
     private fun readEnvironment(node: JsonNode): BenchmarkEnvironment =
         node.toValue<BenchmarkEnvironment>()
@@ -103,26 +110,26 @@ object BenchmarkJson {
             node.forEach { add(nodeToMeasurement(it)) }
         }
 
-    private fun nodeToMeasurement(row: JsonNode): TransportMeasurement {
-        val name = row.get("name")?.asString()
-            ?: throw IOException("transport measurement without a name field")
-        return when (name) {
-            TransportMeasurement.NAME_CONNECT,
-            TransportMeasurement.NAME_RTT ->
-                row.toValue<LatencyMeasurementResult>()
+    private fun nodeToMeasurement(row: JsonNode): TransportMeasurement =
+        (row.get("name")?.asString()
+            ?: throw IOException("transport measurement without a name field")).let {
+            when (it) {
+                TransportMeasurement.NAME_CONNECT,
+                TransportMeasurement.NAME_RTT ->
+                    row.toValue<LatencyMeasurementResult>()
 
-            TransportMeasurement.NAME_THROUGHPUT ->
-                row.toValue<ThroughputMeasurementResult>()
+                TransportMeasurement.NAME_THROUGHPUT ->
+                    row.toValue<ThroughputMeasurementResult>()
 
-            TransportMeasurement.NAME_BIDIRECTIONAL ->
-                row.toValue<BidirectionalMeasurementResult>()
+                TransportMeasurement.NAME_BIDIRECTIONAL ->
+                    row.toValue<BidirectionalMeasurementResult>()
 
-            TransportMeasurement.NAME_LOADED_LATENCY ->
-                row.toValue<LoadedLatencyMeasurementResult>()
+                TransportMeasurement.NAME_LOADED_LATENCY ->
+                    row.toValue<LoadedLatencyMeasurementResult>()
 
-            else -> throw IOException("unknown transport measurement name: $name")
+                else -> throw IOException("unknown transport measurement name: $it")
+            }
         }
-    }
 
     fun readInvocationManifest(path: Path): InvocationManifest =
         readNode(path).toValue()

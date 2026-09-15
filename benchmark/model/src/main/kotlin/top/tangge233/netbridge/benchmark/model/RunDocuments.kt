@@ -33,5 +33,7 @@ data class MinecraftSessionRunDocument(
     override val suite: String,
     val environment: MinecraftSessionEnvironment,
     val startedAt: String,
+    val sessionId: String? = null,
+    val attempts: Int? = null,
     val results: List<MinecraftSessionMilestone>
 ) : RunDocument

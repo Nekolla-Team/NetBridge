@@ -48,11 +48,13 @@ object TransportResultWriter {
             host = config.host,
             port = config.port,
             workers = config.workers,
-            rttPayloadBytes = config.rttPayloadBytes,
+            rttPayloads = config.rttPayloads,
             throughputDurationMillis = config.throughputDurationMillis,
             connectIterations = config.connectIterations,
             rttMeasuredIterations = config.rttMeasuredIterations,
             startServer = config.startServer,
+            repetitions = config.repetitions,
+            seed = config.seed,
             nativeLibrary = config.nativeLibrary?.toString()
         )
 

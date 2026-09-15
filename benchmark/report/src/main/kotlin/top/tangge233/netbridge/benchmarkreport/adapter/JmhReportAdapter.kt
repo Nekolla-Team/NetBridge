@@ -1,5 +1,6 @@
 package top.tangge233.netbridge.benchmarkreport.adapter
 
+import top.tangge233.netbridge.benchmark.model.BenchmarkEnvironment
 import top.tangge233.netbridge.benchmarkreport.dsl.Cell
 import top.tangge233.netbridge.benchmarkreport.dsl.report
 import top.tangge233.netbridge.benchmarkreport.format.HumanUnits
@@ -13,13 +14,14 @@ object JmhReportAdapter {
     fun adapt(
         task: String,
         results: List<JmhResultDto>,
-        hasConsoleOutput: Boolean
+        hasConsoleOutput: Boolean,
+        environment: BenchmarkEnvironment? = null
     ): ReportModel = report {
         this.task = task
         suite = SUITE
         suiteTitle = SuiteTitles.jmh(results)
-        executedAt = Instant.now().toString()
-        git = null
+        executedAt = environment?.timestamp?.toString() ?: Instant.now().toString()
+        git = gitLabel(environment?.gitCommit, environment?.gitDirty)
 
         val groups = results.groupBy { it.benchmark.substringBeforeLast('.') }
         val maxForks = results.maxOfOrNull { it.forks } ?: 0
@@ -51,14 +53,14 @@ object JmhReportAdapter {
                     "Error",
                     "Unit"
                 ),
-                rows = classRows.map { row ->
-                    val metric = row.primaryMetric
+                rows = classRows.map {
+                    val metric = it.primaryMetric
                     val score = metric?.score ?: Double.NaN
                     val scoreError = metric?.scoreError ?: Double.NaN
                     val unit = metric?.scoreUnit ?: ""
                     listOf(
-                        Cell("Method", TextValue(row.benchmark.substringAfterLast('.'))),
-                        Cell("Parameters", TextValue(parametersText(row.params))),
+                        Cell("Method", TextValue(it.benchmark.substringAfterLast('.'))),
+                        Cell("Parameters", TextValue(parametersText(it.params))),
                         Cell("Score", DecimalValue(score)),
                         Cell("Score (Formatted)", formattedScore(score, unit)),
                         Cell("Error", SignedDecimalValue(scoreError)),
@@ -68,11 +70,18 @@ object JmhReportAdapter {
             )
         }
 
-        keyValues(
-            "Environment",
-            emptyList(),
-            note = "No environment metadata available."
-        )
+        if (environment != null) {
+            keyValues(
+                "Environment",
+                environmentEntries(environment)
+            )
+        } else {
+            keyValues(
+                "Environment",
+                emptyList(),
+                note = "No environment metadata available."
+            )
+        }
 
         artifact(
             "raw.json",

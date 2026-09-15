@@ -18,10 +18,11 @@ class FakeNativeConnection(
     private val inboundQueue = ArrayDeque<ByteArray>()
     private var stateValue = NativeConnectionState.CONNECTING
     private var listener: NativeConnectionListener? = null
-    private var writeWouldBlock = false
-    private var endlessRead = false
-    private var endlessPattern: ByteArray? = null
-    private var endlessPatternLength = 0
+
+    @Volatile private var writeWouldBlock = false
+    @Volatile private var endlessRead = false
+    @Volatile private var endlessPattern: ByteArray? = null
+    @Volatile private var endlessPatternLength = 0
 
     constructor(id: Int) : this(id.toLong())
 
@@ -126,12 +127,17 @@ class FakeNativeConnection(
         notify?.onWritable()
     }
 
+    /**
+     * Enqueues [data] for the next [read]. The array is stored by reference (never cloned):
+     * callers must not mutate it until it has been consumed, which keeps this off the
+     * measured read/write path.
+     */
     fun push(data: ByteArray) {
         val notify = synchronized(stateLock) {
             listener
         }
         synchronized(inboundQueue) {
-            inboundQueue.addLast(data.clone())
+            inboundQueue.addLast(data)
         }
         notify?.onDataAvailable()
     }

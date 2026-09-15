@@ -25,10 +25,29 @@ private fun <T : TransportMeasurement> List<T>.sortedByTransport(
     payloadBytes: (T) -> Int
 ): List<T> = sortedWith(compareBy({ it.transport }, payloadBytes))
 
+private const val P95_MIN_SAMPLES = 20
+private const val P99_MIN_SAMPLES = 100
+private const val P999_MIN_SAMPLES = 1_000
+
+private fun percentileCell(
+    label: String,
+    valueNanos: Long,
+    samples: Int,
+    minSamples: Int
+): Cell =
+    Cell(
+        label,
+        if (samples >= minSamples) {
+            DurationValue.ofNanos(valueNanos)
+        } else {
+            MissingValue()
+        }
+    )
+
 private fun latencyCells(
     transport: String,
     payloadBytes: Long,
-    cpuNanos: Long,
+    cpuNanos: Long?,
     block: LatencyBlock
 ): List<Cell> = listOf(
     Cell("Transport", TextValue(transport)),
@@ -36,12 +55,15 @@ private fun latencyCells(
     Cell("Samples", IntegerValue(block.samples.toLong())),
     Cell("Mean", DurationValue(block.meanNanos)),
     Cell("P50", DurationValue.ofNanos(block.p50Nanos)),
-    Cell("P95", DurationValue.ofNanos(block.p95Nanos)),
-    Cell("P99", DurationValue.ofNanos(block.p99Nanos)),
-    Cell("P99.9", DurationValue.ofNanos(block.p999Nanos)),
+    percentileCell("P95", block.p95Nanos, block.samples, P95_MIN_SAMPLES),
+    percentileCell("P99", block.p99Nanos, block.samples, P99_MIN_SAMPLES),
+    percentileCell("P99.9", block.p999Nanos, block.samples, P999_MIN_SAMPLES),
     Cell("Min", DurationValue.ofNanos(block.minNanos)),
     Cell("Max", DurationValue.ofNanos(block.maxNanos)),
-    Cell("CPU Time", DurationValue.ofNanos(cpuNanos))
+    Cell(
+        "CPU Time",
+        cpuNanos?.let { DurationValue.ofNanos(it) } ?: MissingValue()
+    )
 )
 
 private fun latencyRow(r: LatencyMeasurementResult): List<Cell> =
@@ -105,7 +127,11 @@ private fun throughputSections(
                         Cell("Duration", DurationValue.ofNanos(it.durationNanos)),
                         Cell("Data Transferred", BytesValue(it.payloadBytesTransferred)),
                         Cell("Throughput", ThroughputValue(it.mibPerSecond)),
-                        Cell("CPU Time", DurationValue.ofNanos(it.processCpuNanos)),
+                        Cell(
+                            "CPU Time",
+                            it.processCpuNanos?.let { cpu -> DurationValue.ofNanos(cpu) }
+                                ?: MissingValue()
+                        ),
                         Cell("Integrity", StatusValue(ok = !it.integrityError))
                     )
                 }
@@ -185,7 +211,11 @@ private fun loadedLatencySections(
                     Cell("Transport", TextValue(it.transport)),
                     Cell("Payload", BytesValue(it.payloadBytes.toLong())),
                     Cell("P50", DurationValue.ofNanos(it.bufferbloatP50Nanos)),
-                    Cell("P99", DurationValue.ofNanos(it.bufferbloatP99Nanos)),
+                    if (minOf(it.idleSamples, it.loadedSamples) >= P99_MIN_SAMPLES) {
+                        Cell("P99", DurationValue.ofNanos(it.bufferbloatP99Nanos))
+                    } else {
+                        Cell("P99", MissingValue())
+                    },
                     Cell("Stream Throughput", ThroughputValue(it.streamMibPerSecond)),
                     Cell("Integrity", StatusValue(ok = !it.integrityError))
                 )
@@ -222,35 +252,44 @@ private fun measurementSections(
     results: List<TransportMeasurement>
 ): List<Section> =
     buildList {
-        val connects = results.resultsOf<LatencyMeasurementResult>(TransportMeasurement.NAME_CONNECT)
-        if (connects.isNotEmpty()) {
-            add(latencySection(TransportMeasurement.NAME_CONNECT, connects))
+        results.resultsOf<LatencyMeasurementResult>(
+            TransportMeasurement.NAME_CONNECT
+        ).run {
+            if (isNotEmpty()) {
+                add(latencySection(TransportMeasurement.NAME_CONNECT, this))
+            }
         }
 
-        val rttRows = results.resultsOf<LatencyMeasurementResult>(TransportMeasurement.NAME_RTT)
-        if (rttRows.isNotEmpty()) {
-            add(latencySection(TransportMeasurement.NAME_RTT, rttRows))
+        results.resultsOf<LatencyMeasurementResult>(
+            TransportMeasurement.NAME_RTT
+        ).run {
+            if (isNotEmpty()) {
+                add(latencySection(TransportMeasurement.NAME_RTT, this))
+            }
         }
 
-        val throughputs = results.resultsOf<ThroughputMeasurementResult>(
+        results.resultsOf<ThroughputMeasurementResult>(
             TransportMeasurement.NAME_THROUGHPUT
-        )
-        if (throughputs.isNotEmpty()) {
-            addAll(throughputSections(throughputs))
+        ).run {
+            if (isNotEmpty()) {
+                addAll(throughputSections(this))
+            }
         }
 
-        val bidirectional = results.resultsOf<BidirectionalMeasurementResult>(
+        results.resultsOf<BidirectionalMeasurementResult>(
             TransportMeasurement.NAME_BIDIRECTIONAL
-        )
-        if (bidirectional.isNotEmpty()) {
-            addAll(bidirectionalSections(bidirectional))
+        ).run {
+            if (isNotEmpty()) {
+                addAll(bidirectionalSections(this))
+            }
         }
 
-        val loaded = results.resultsOf<LoadedLatencyMeasurementResult>(
+        results.resultsOf<LoadedLatencyMeasurementResult>(
             TransportMeasurement.NAME_LOADED_LATENCY
-        )
-        if (loaded.isNotEmpty()) {
-            addAll(loadedLatencySections(loaded))
+        ).run {
+            if (isNotEmpty()) {
+                addAll(loadedLatencySections(this))
+            }
         }
     }
 
@@ -293,7 +332,7 @@ private fun transportReport(
             "Integrity Errors",
             integrityErrors.toString(),
             if (integrityErrors == 0) {
-                "All frames verified"
+                "No integrity error reported by available checks"
             } else {
                 "$integrityErrors row(s) with a payload mismatch"
             }
@@ -309,8 +348,11 @@ private fun transportReport(
         scope("Host", doc.configuration.host)
         scope("Port", doc.configuration.port.toString())
         scope("Workers", doc.configuration.workers.toString())
-        scope("Rtt payload bytes", doc.configuration.rttPayloadBytes.toString())
-        scope("Throughput duration millis", doc.configuration.throughputDurationMillis.toString())
+        scope("Rtt payloads", doc.configuration.rttPayloads.pretty())
+        scope(
+            "Throughput duration millis",
+            doc.configuration.throughputDurationMillis.toString()
+        )
         scope("Connect iterations", doc.configuration.connectIterations.toString())
         scope("Rtt measured iterations", doc.configuration.rttMeasuredIterations.toString())
         scope("Start server", doc.configuration.startServer.toString())

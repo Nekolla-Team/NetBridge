@@ -1,0 +1,62 @@
+name: benchmark-perf
+
+# Dedicated performance baseline workflow.
+#
+# Unlike .github/workflows/benchmark.yml (GitHub-hosted smoke), this workflow
+# MUST run on a self-hosted runner with fixed hardware, kernel, JDK and Rust
+# toolchain. Only such runs are valid inputs to `:benchmark:compare`.
+#
+# Required runner labels: [self-hosted, benchmark, bare-metal]
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which suite to run
+        type: choice
+        default: transport
+        options:
+          - micro
+          - transport
+          - all
+      repetitions:
+        description: Counterbalanced repetitions (>= 3 recommended)
+        default: "3"
+
+jobs:
+  benchmark-perf:
+    runs-on: [ self-hosted, benchmark, bare-metal ]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Record runner identity
+        run: |
+          echo "runner=${{ runner.name }}"
+          echo "os=$(uname -a)"
+          echo "nproc=$(nproc)"
+          cat /proc/cpuinfo | grep -m1 "model name" || true
+          cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
+
+      - name: Micro benchmarks (JMH)
+        if: ${{ inputs.suite == 'micro' || inputs.suite == 'all' }}
+        run: ./gradlew :benchmark:jmh --stacktrace
+
+      - name: Transport benchmark (multi-repetition)
+        if: ${{ inputs.suite == 'transport' || inputs.suite == 'all' }}
+        run: |
+          ./gradlew :benchmark:transportBenchmark \
+            -PbenchmarkRepetitions=${{ inputs.repetitions }} \
+            -PbenchmarkIterations=1000 \
+            --stacktrace
+
+      - name: Allocation suite (GC profiler)
+        if: ${{ inputs.suite == 'all' }}
+        run: ./gradlew :benchmark:jmhAllocation --stacktrace
+
+      - name: Upload full environment manifest + raw results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-perf-${{ github.run_id }}
+          path: |
+            benchmark/build/results/
+            benchmark/build/reports/benchmarks/

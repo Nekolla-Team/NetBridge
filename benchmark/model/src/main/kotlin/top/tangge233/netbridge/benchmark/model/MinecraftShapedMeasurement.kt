@@ -15,23 +15,31 @@ data class MinecraftShapedMeasurement(
     val durationNanos: Long,
     val completionTimeNanos: Long,
     val mibPerSecond: Double,
-    val processCpuNanos: Long,
+    val processCpuNanos: Long? = null,
     val smallMessageCount: Int,
     val smallMessageMeanNanos: Double? = null,
     val smallMessageP50Nanos: Long? = null,
     val smallMessageP95Nanos: Long? = null,
     val smallMessageP99Nanos: Long? = null,
-    val smallMessageP999Nanos: Long? = null
+    val smallMessageP999Nanos: Long? = null,
+    val serverToClientBytes: Long? = null,
+    val maxScheduleSlipNanos: Long? = null,
+    val deadlineMisses: Long? = null
 )
 
 /** Real-Minecraft session milestone (see MinecraftBenchmarkRecorder). */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class MinecraftSessionMilestone(
     val name: String,
-    val wallNanos: Long,
+    val elapsedNanos: Long? = null,
+    val wallNanos: Long? = null,
     val at: String,
+    val sessionId: String? = null,
+    val attemptId: Int? = null,
     val host: String? = null,
     val port: Int? = null,
+    val targetKind: String? = null,
+    val targetHash: String? = null,
     val uniqueChunks: Int? = null
 )
 

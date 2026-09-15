@@ -30,7 +30,12 @@
     "host": "127.0.0.1",
     "port": 0,
     "workers": 2,
-    "rttPayloadBytes": 1024,
+    "rttPayloads": [
+      64,
+      256,
+      1024,
+      4096
+    ],
     "throughputDurationMillis": 1500,
     "connectIterations": 5,
     "rttMeasuredIterations": 5,

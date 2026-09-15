@@ -11,6 +11,8 @@
     "StatusResponseWriteMixin"
   ],
   "client": [
+    "ClientHandshakePacketListenerImplMixin",
+    "ClientPacketListenerMixin",
     "ConnectScreenMixin",
     "DebugScreenOverlayMixin"
   ],

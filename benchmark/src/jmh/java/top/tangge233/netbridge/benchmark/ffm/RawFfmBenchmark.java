@@ -11,8 +11,13 @@ import java.nio.file.Path;
 import java.util.stream.IntStream;
 
 /**
- * L0 raw Java&lt;-&gt;native boundary benchmarks against the benchmark-only probe library. Java
- * baselines run on the same work to expose pure FFM overhead.
+ * L0 raw Java&lt;-&gt;native boundary benchmarks against the benchmark-only probe library.
+ *
+ * <p>{@code javaNoop}/{@code javaEchoU64} are JVM floor/reference points built from plain
+ * arithmetic; they are <em>not</em> equivalent-work baselines. The
+ * {@code javaReadDirectBuffer}/{@code javaWriteDirectBuffer} methods do perform equivalent
+ * direct-buffer work and are the baselines to compare against the {@code ffmRead/WriteDirectBuffer}
+ * downcalls.
  */
 @State(Scope.Benchmark)
 @SuppressWarnings({"NullAway", "unused", "NotNullFieldNotInitialized"})
@@ -85,6 +90,33 @@ public class RawFfmBenchmark {
     public void javaEchoU64(Blackhole bh) {
         sinkValue = (sinkValue ^ (sinkValue >>> 33)) * 0xFF51AFD7ED558CCDL;
         bh.consume(sinkValue);
+    }
+
+    @Benchmark
+    public void javaReadDirectBuffer(Blackhole bh) {
+        var sum = IntStream.iterate(
+                        0,
+                        i -> i < bufferBytes,
+                        i -> i + Long.BYTES
+                )
+                .mapToLong(i ->
+                        srcBuffer.get(ValueLayout.JAVA_LONG, i)
+                )
+                .sum();
+        bh.consume(sum);
+    }
+
+    @Benchmark
+    public void javaWriteDirectBuffer(Blackhole bh) {
+        IntStream.range(0, bufferBytes)
+                .forEach(i ->
+                        dstBuffer.set(
+                                ValueLayout.JAVA_BYTE,
+                                i,
+                                (byte) 0x5A
+                        )
+                );
+        bh.consume(dstBuffer.get(ValueLayout.JAVA_BYTE, bufferBytes - 1));
     }
 
     // ------------------------------------------------------------------

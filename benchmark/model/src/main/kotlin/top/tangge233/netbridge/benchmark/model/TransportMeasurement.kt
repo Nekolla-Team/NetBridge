@@ -54,7 +54,10 @@ data class LatencyMeasurementResult(
     val p95Nanos: Long,
     val p99Nanos: Long,
     val p999Nanos: Long,
-    val processCpuNanos: Long
+    val processCpuNanos: Long? = null,
+    val cpuScope: String? = null,
+    val repetition: Int? = null,
+    val seed: Long? = null
 ) : TransportMeasurement
 
 /** {@code throughput} row: one-way stream transfer summary. */
@@ -66,8 +69,12 @@ data class ThroughputMeasurementResult(
     val durationNanos: Long,
     val payloadBytesTransferred: Long,
     val mibPerSecond: Double,
-    val processCpuNanos: Long,
-    val integrityError: Boolean
+    val processCpuNanos: Long? = null,
+    val integrityError: Boolean,
+    val configuredDurationNanos: Long? = null,
+    val cpuScope: String? = null,
+    val repetition: Int? = null,
+    val seed: Long? = null
 ) : TransportMeasurement
 
 /** {@code bidirectional} row: same base as throughput plus directional accounting. */
@@ -79,12 +86,15 @@ data class BidirectionalMeasurementResult(
     val durationNanos: Long,
     val payloadBytesTransferred: Long,
     val mibPerSecond: Double,
-    val processCpuNanos: Long,
+    val processCpuNanos: Long? = null,
     val integrityError: Boolean,
     val serverToClientBytes: Long,
     val clientToServerBytes: Long,
     val serverToClientMibPerSecond: Double,
-    val clientToServerMibPerSecond: Double
+    val clientToServerMibPerSecond: Double,
+    val cpuScope: String? = null,
+    val repetition: Int? = null,
+    val seed: Long? = null
 ) : TransportMeasurement
 
 /**
@@ -114,9 +124,13 @@ data class LoadedLatencyMeasurementResult(
     val loadedP999Nanos: Long,
     val bufferbloatP50Nanos: Long,
     val bufferbloatP99Nanos: Long,
-    val processCpuNanos: Long,
+    val processCpuNanos: Long? = null,
     val streamMibPerSecond: Double,
-    val integrityError: Boolean
+    val integrityError: Boolean,
+    val configuredDurationNanos: Long? = null,
+    val cpuScope: String? = null,
+    val repetition: Int? = null,
+    val seed: Long? = null
 ) : TransportMeasurement {
 
     val idleBlock: LatencyBlock

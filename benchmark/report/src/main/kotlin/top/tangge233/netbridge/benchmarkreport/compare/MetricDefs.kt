@@ -46,14 +46,14 @@ object MetricDefs {
         def("P99.9", MetricKind.DURATION, true) { it.p999Nanos.toDouble() },
         def("Min", MetricKind.DURATION, true) { it.minNanos.toDouble() },
         def("Max", MetricKind.DURATION, true) { it.maxNanos.toDouble() },
-        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos.toDouble() }
+        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos?.toDouble() ?: Double.NaN }
     )
 
     val throughput: List<MetricDef<ThroughputMeasurementResult>> = listOf(
         def("Duration", MetricKind.DURATION, true) { it.durationNanos.toDouble() },
         def("Data Transferred", MetricKind.BYTES, true) { it.payloadBytesTransferred.toDouble() },
         def("Throughput", MetricKind.RATE, true) { it.mibPerSecond },
-        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos.toDouble() }
+        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos?.toDouble() ?: Double.NaN }
     )
 
     val bidirectional: List<MetricDef<BidirectionalMeasurementResult>> = listOf(
@@ -62,7 +62,7 @@ object MetricDefs {
         def("Server->Client", MetricKind.BYTES, true) { it.serverToClientBytes.toDouble() },
         def("Client->Server Throughput", MetricKind.RATE, true) { it.clientToServerMibPerSecond },
         def("Server->Client Throughput", MetricKind.RATE, true) { it.serverToClientMibPerSecond },
-        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos.toDouble() }
+        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos?.toDouble() ?: Double.NaN }
     )
 
     val loadedLatency: List<MetricDef<LoadedLatencyMeasurementResult>> = listOf(
@@ -75,14 +75,14 @@ object MetricDefs {
         def("Bufferbloat P50", MetricKind.DURATION, true) { it.bufferbloatP50Nanos.toDouble() },
         def("Bufferbloat P99", MetricKind.DURATION, true) { it.bufferbloatP99Nanos.toDouble() },
         def("Stream Throughput", MetricKind.RATE, true) { it.streamMibPerSecond },
-        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos.toDouble() }
+        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos?.toDouble() ?: Double.NaN }
     )
 
     val minecraftShaped: List<MetricDef<MinecraftShapedMeasurement>> = listOf(
         def("Messages", MetricKind.COUNT, false) { it.messages.toDouble() },
         def("Duration", MetricKind.DURATION, true) { it.durationNanos.toDouble() },
         def("Throughput", MetricKind.RATE, true) { it.mibPerSecond },
-        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos.toDouble() }
+        def("CPU Time", MetricKind.DURATION, false) { it.processCpuNanos?.toDouble() ?: Double.NaN }
     )
 
     val jmh: List<MetricDef<JmhResultDto>> = listOf(
@@ -102,5 +102,35 @@ object MetricDefs {
             it.primaryMetric?.scorePercentiles?.get("99.0") ?: Double.NaN
         }
     )
+
+    /**
+     * JMH metric definitions adapted to the row's own score unit (B-048): time/op rows use the
+     * duration formatter, throughput-style rows (e.g. ops/s) use a decimal formatter.
+     */
+    fun jmhFor(scoreUnit: String?): List<MetricDef<JmhResultDto>> {
+        val timeBased = scoreUnit == null
+            || scoreUnit.startsWith("ns")
+            || scoreUnit.startsWith("us")
+            || scoreUnit.startsWith("ms")
+            || scoreUnit.startsWith("s")
+        val kind = if (timeBased) MetricKind.DURATION else MetricKind.DECIMAL
+        return listOf(
+            def("Score", kind, timeBased) {
+                it.primaryMetric?.score ?: Double.NaN
+            },
+            def("Score Error", MetricKind.DECIMAL, false) {
+                it.primaryMetric?.scoreError ?: Double.NaN
+            },
+            def("P50", kind, timeBased) {
+                it.primaryMetric?.scorePercentiles?.get("50.0") ?: Double.NaN
+            },
+            def("P95", kind, timeBased) {
+                it.primaryMetric?.scorePercentiles?.get("95.0") ?: Double.NaN
+            },
+            def("P99", kind, timeBased) {
+                it.primaryMetric?.scorePercentiles?.get("99.0") ?: Double.NaN
+            }
+        )
+    }
 
 }

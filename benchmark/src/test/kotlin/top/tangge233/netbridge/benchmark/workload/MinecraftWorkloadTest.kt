@@ -8,8 +8,8 @@ class MinecraftWorkloadTest {
     @Test
     fun movementWorkloadSizes() {
         val movement = BuiltinMinecraftWorkloads.MOVEMENT
-        assertEquals(5000 * 12L + 2500 * 16L, movement.totalBytes)
-        assertEquals(7500L, movement.totalMessages)
+        assertEquals(20 * 12L + 10 * 16L, movement.totalBytes)
+        assertEquals(30L, movement.totalMessages)
         assertTrue(movement.hasSmallMessages)
     }
 

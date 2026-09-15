@@ -45,4 +45,31 @@ class CompareCliTest {
         }
     }
 
+    @Test
+    fun `incompatible measurement method version is rejected unless forced`() {
+        val before = Fixtures.text("transport.json")
+        val after = before.replace("\"suiteVersion\": \"1\"", "\"suiteVersion\": \"2\"")
+        assertThrows<UsageError> {
+            compareTexts(before, after)
+        }
+
+        val forced = compareTexts(before, after, force = true)
+        assertTrue(
+            forced.any { it.startsWith("WARNING: forced comparison") },
+            "expected a forced-comparison warning, got ${forced.joinToString()}"
+        )
+    }
+
+    @Test
+    fun `jmh score unit mismatch is rejected`() {
+        val before = Fixtures.text("jmh.json")
+        val after = before.replace(
+            "\"scoreUnit\": \"ns/op\"",
+            "\"scoreUnit\": \"ops/s\""
+        )
+        assertThrows<UsageError> {
+            compareTexts(before, after)
+        }
+    }
+
 }

@@ -34,10 +34,10 @@ class NativeChannelIntegrationBenchmarkCli : CliktCommand(name = "native-channel
         help = "connect|rtt|throughput|bidirectional|loaded-latency|all (comma)"
     )
 
-    private val payload: Long? by option(
-        "--payload",
-        help = "RTT payload bytes (default 1024)"
-    ).long()
+    private val rttPayloads: String? by option(
+        "--rtt-payloads",
+        help = "comma-separated RTT payload sizes (default 64,256,1024,4096)"
+    )
 
     private val duration: Long? by option(
         "--duration",
@@ -69,6 +69,16 @@ class NativeChannelIntegrationBenchmarkCli : CliktCommand(name = "native-channel
         help = "native library path override"
     )
 
+    private val repetitions: Int? by option(
+        "--repetitions",
+        help = "number of counterbalanced repetitions (default 1)"
+    ).int()
+
+    private val seed: Long? by option(
+        "--seed",
+        help = "seed for transport/case order randomization (default 0)"
+    ).long()
+
     override fun run() {
         val base = TransportConfig.defaults().copy(
             transports = listOf(
@@ -80,27 +90,37 @@ class NativeChannelIntegrationBenchmarkCli : CliktCommand(name = "native-channel
 
         val transport = this.transport
         val case = this.case
-        val payload = this.payload
+        val rttPayloads = this.rttPayloads
         val duration = this.duration
         val iterations = this.iterations
         val host = this.host
         val port = this.port
         val workers = this.workers
+        val repetitions = this.repetitions
+        val seed = this.seed
 
         val cfg = base
-            .let { if (transport != null) it.withTransport(transport) else it }
-            .let { if (case != null) it.withCase(case) else it }
-            .let { if (payload != null) it.copy(rttPayloadBytes = payload) else it }
-            .let { if (duration != null) it.copy(throughputDurationMillis = duration) else it }
-            .let {
-                if (iterations != null) it.copy(
-                    connectIterations = iterations,
-                    rttMeasuredIterations = iterations
-                ) else it
-            }
-            .let { if (host != null) it.copy(host = host) else it }
-            .let { if (port != null) it.copy(port = port) else it }
-            .let { if (workers != null) it.copy(workers = workers) else it }
+                .let { if (transport != null) it.withTransport(transport) else it }
+                .let { if (case != null) it.withCase(case) else it }
+                .let { if (rttPayloads != null) it.withRttPayloads(rttPayloads) else it }
+                .let { if (duration != null) it.copy(throughputDurationMillis = duration) else it }
+                .let {
+                    if (iterations != null) it.copy(
+                        connectIterations = iterations,
+                        rttMeasuredIterations = iterations
+                    ) else it
+                }
+                .let { if (host != null) it.copy(host = host) else it }
+                .let { if (port != null) it.copy(port = port) else it }
+                .let { if (workers != null) it.copy(workers = workers) else it }
+                .withRepetitions(repetitions)
+                .withSeed(seed)
+
+        require(cfg.transports.all { it.nativeTransport }) {
+            "L3B native-channel integration only supports native transports (quic|kcp-balanced|kcp-aggressive), got ${
+                cfg.transports.map { it.label }
+            }"
+        }
 
         val nativeLibrary = requireNotNull(resolveNativeLibrary(this.nativeLib, cfg)) {
             "set -Dnetbridge.native.path or pass --native-lib"
@@ -138,8 +158,8 @@ class NativeChannelIntegrationBenchmarkCli : CliktCommand(name = "native-channel
         fromArg?.let(Path::of)
             ?: cfg.nativeLibrary
             ?: System.getProperty("netbridge.native.path")
-                ?.takeIf { it.isNotBlank() }
-                ?.let(Path::of)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(Path::of)
 
 }
 

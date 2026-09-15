@@ -29,7 +29,8 @@ object ReportPipeline {
         task: String,
         raw: Path,
         jmhOutput: Path?,
-        reportDir: Path
+        reportDir: Path,
+        jmhEnv: Path? = null
     ): ReportMeta {
         require(isSupportedSuite(suite)) {
             "unsupported suite '$suite'"
@@ -39,11 +40,15 @@ object ReportPipeline {
 
         val outcome = if (suite == JmhReportAdapter.SUITE) {
             val results = JmhJson.read(rawText)
+            val environment = jmhEnv?.let {
+                runCatching { BenchmarkJson.readEnvironment(it) }.getOrNull()
+            }
             ModelOutcome(
                 model = JmhReportAdapter.adapt(
                     task,
                     results,
-                    jmhOutput != null
+                    jmhOutput != null,
+                    environment
                 ),
                 resultRows = results.size,
                 benchmarkCaseCount = results

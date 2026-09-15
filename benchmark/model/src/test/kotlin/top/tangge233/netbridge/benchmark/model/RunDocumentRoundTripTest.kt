@@ -37,7 +37,7 @@ class RunDocumentRoundTripTest {
         assertEquals("127.0.0.1", cfg.host)
         assertEquals(0, cfg.port)
         assertEquals(2, cfg.workers)
-        assertEquals(1024L, cfg.rttPayloadBytes)
+        assertEquals(listOf(64, 256, 1024, 4096), cfg.rttPayloads)
         assertEquals(10_000L, cfg.throughputDurationMillis)
         assertEquals(5, cfg.connectIterations)
         assertEquals(5, cfg.rttMeasuredIterations)
@@ -146,12 +146,12 @@ class RunDocumentRoundTripTest {
             reparsed.results.size
         )
         doc.results
-            .zip(reparsed.results)
-            .forEach { (a, b) ->
-                assertEquals(a.name, b.name)
-                assertEquals(a.transport, b.transport)
-                assertEquals(a::class, b::class)
-            }
+                .zip(reparsed.results)
+                .forEach { (a, b) ->
+                    assertEquals(a.name, b.name)
+                    assertEquals(a.transport, b.transport)
+                    assertEquals(a::class, b::class)
+                }
         val originalRtt = doc.results.filterIsInstance<LatencyMeasurementResult>()
         val roundTripRtt = reparsed.results.filterIsInstance<LatencyMeasurementResult>()
         assertEquals(
@@ -176,7 +176,7 @@ class RunDocumentRoundTripTest {
             host = "127.0.0.1",
             port = 0,
             workers = 2,
-            rttPayloadBytes = 1024,
+            rttPayloads = listOf(1024),
             throughputDurationMillis = 10_000,
             connectIterations = 5,
             rttMeasuredIterations = 5,

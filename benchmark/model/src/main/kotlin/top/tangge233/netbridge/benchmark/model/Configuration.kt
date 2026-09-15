@@ -16,11 +16,13 @@ data class TransportConfigurationSnapshot(
     val host: String,
     val port: Int,
     val workers: Int,
-    val rttPayloadBytes: Long,
+    val rttPayloads: List<Int>,
     val throughputDurationMillis: Long,
     val connectIterations: Int,
     val rttMeasuredIterations: Int,
     val startServer: Boolean,
+    val repetitions: Int = 1,
+    val seed: Long = 0L,
     /** Serialized as an explicit JSON null when unset, matching current output. */
     @field:JsonInclude(JsonInclude.Include.ALWAYS)
     val nativeLibrary: String? = null

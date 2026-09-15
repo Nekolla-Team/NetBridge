@@ -130,7 +130,7 @@ class AdaptersTest {
         val table = model.sections.first { it.title == "Session Milestones" }
         assertEquals(5, table.rows.size)
         assertEquals("CONNECT_REQUESTED", table.rows[0][0].value.text())
-        assertEquals("mc.example", table.rows[0][2].value.text())
+        assertEquals("mc.example:25565", table.rows[0][4].value.text())
     }
 
     @Test

@@ -1,18 +1,17 @@
 package top.tangge233.netbridge.benchmark.transport
 
-import top.tangge233.netbridge.benchmark.common.LatencySamples
-import top.tangge233.netbridge.benchmark.common.percentile
-import top.tangge233.netbridge.benchmark.common.processCpuNanos
+import top.tangge233.netbridge.benchmark.common.*
 import top.tangge233.netbridge.benchmark.model.*
 import java.io.PrintStream
 import java.nio.file.Path
+import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
-private val RTT_PAYLOADS = listOf(64, 256, 1024, 4096)
 private const val STREAM_CHUNK_BYTES = 65536
 private const val LOADED_PING_BYTES = 64
 private const val LOADED_PING_INTERVAL_MILLIS = 100L
+private const val LOADED_IDLE_SAMPLES = 30
 private const val CONNECT_WARMUP = 20
 private const val RTT_WARMUP = 20
 
@@ -33,30 +32,52 @@ class TransportRunner(private val log: PrintStream) {
     private fun await(
         f: CompletableFuture<ClientSession.StreamOutcome>
     ): ClientSession.StreamOutcome =
-        f.get(60, TimeUnit.SECONDS)
-
-    private fun mib(bytes: Long, wallNanos: Long): Double {
-        val seconds = wallNanos / 1_000_000_000.0
-        return if (seconds > 0) {
-            (bytes / (1024.0 * 1024.0)) / seconds
-        } else {
-            0.0
+        f.get(60, TimeUnit.SECONDS).also {
+            check(!it.failed) { "stream failed: ${it.error}" }
         }
+
+    private fun awaitStats(
+        f: CompletableFuture<SessionStats>,
+        timeoutMillis: Long
+    ): SessionStats =
+        f.get(timeoutMillis, TimeUnit.MILLISECONDS)
+
+    private fun mib(bytes: Long, wallNanos: Long): Double =
+        (wallNanos / 1_000_000_000.0).let {
+            if (it > 0) {
+                (bytes / (1024.0 * 1024.0)) / it
+            } else {
+                0.0
+            }
+        }
+
+    private fun integrityError(
+        stats: SessionStats,
+        session: ClientSession,
+        expectedServerBytes: Long
+    ): Boolean =
+        stats.corruptFrames > 0
+                || stats.disorderEvents > 0
+                || stats.failedWrites > 0
+                || stats.bytesReceived != expectedServerBytes
+                || session.corruptInboundFrames > 0
+                || session.disorderEvents > 0
+
+    fun runAll(cfg: TransportConfig): List<TransportMeasurement> {
+        val rows = mutableListOf<TransportMeasurement>()
+        repeat(cfg.repetitions) { repetition ->
+            val ordered = cfg.transports.shuffled(Random(cfg.seed + repetition))
+            ordered.forEach { transport ->
+                rows += runTransport(transport, cfg, repetition)
+            }
+        }
+        return rows
     }
-
-    private fun hasIntegrityError(
-        serverBytes: Long,
-        session: ClientSession
-    ): Boolean = serverBytes != session.clientSentBytes
-            || session.corruptInboundFrames > 0
-            || session.disorderEvents > 0
-
-    fun runAll(cfg: TransportConfig): List<TransportMeasurement> =
-        cfg.transports.flatMap { runTransport(it, cfg) }
 
     fun runTransport(
         transport: TransportId,
-        cfg: TransportConfig
+        cfg: TransportConfig,
+        repetition: Int = 0
     ): List<TransportMeasurement> =
         (if (cfg.startServer) newServer(transport, cfg) else null).use { server ->
             val port = server?.port ?: cfg.port
@@ -65,7 +86,8 @@ class TransportRunner(private val log: PrintStream) {
                 transport,
                 cfg.host,
                 port,
-                cfg
+                cfg,
+                repetition
             )
         }
 
@@ -73,7 +95,8 @@ class TransportRunner(private val log: PrintStream) {
         transport: TransportId,
         host: String,
         port: Int,
-        cfg: TransportConfig
+        cfg: TransportConfig,
+        repetition: Int = 0
     ): List<TransportMeasurement> =
         BenchClient.open(
             transport,
@@ -100,6 +123,30 @@ class TransportRunner(private val log: PrintStream) {
                             add(measureLoadedLatency(transport, client, host, port, cfg))
                     }
                 }
+            }.map { stamp(it, repetition, cfg) }
+        }
+
+    private fun cpuScope(cfg: TransportConfig): String =
+        if (cfg.startServer) CpuScope.LOCAL_BOTH_ENDPOINTS else CpuScope.CLIENT_ONLY
+
+    private fun stamp(
+        measurement: TransportMeasurement,
+        repetition: Int,
+        cfg: TransportConfig
+    ): TransportMeasurement =
+        cpuScope(cfg).let {
+            when (measurement) {
+                is LatencyMeasurementResult ->
+                    measurement.copy(cpuScope = it, repetition = repetition, seed = cfg.seed)
+
+                is ThroughputMeasurementResult ->
+                    measurement.copy(cpuScope = it, repetition = repetition, seed = cfg.seed)
+
+                is BidirectionalMeasurementResult ->
+                    measurement.copy(cpuScope = it, repetition = repetition, seed = cfg.seed)
+
+                is LoadedLatencyMeasurementResult ->
+                    measurement.copy(cpuScope = it, repetition = repetition, seed = cfg.seed)
             }
         }
 
@@ -128,9 +175,9 @@ class TransportRunner(private val log: PrintStream) {
         port: Int,
         cfg: TransportConfig
     ): TransportMeasurement {
-        val cpuStart = processCpuNanos()
         warmupConnect(client, host, port)
 
+        val cpuStart = processCpuNanos()
         val samples = LatencySamples()
         repeat(cfg.connectIterations) {
             val t0 = System.nanoTime()
@@ -145,7 +192,7 @@ class TransportRunner(private val log: PrintStream) {
             transport = transport,
             payloadBytes = 0,
             samples = samples,
-            cpuNanos = cpuEnd - cpuStart
+            cpuNanos = cpuDeltaNanos(cpuStart, cpuEnd)
         )
     }
 
@@ -153,14 +200,15 @@ class TransportRunner(private val log: PrintStream) {
         client: BenchClient,
         host: String,
         port: Int
-    ) = repeat(CONNECT_WARMUP) {
-        ClientSession.open(
-            client,
-            host,
-            port,
-            30_000
-        ).use { }
-    }
+    ) =
+        repeat(CONNECT_WARMUP) {
+            ClientSession.open(
+                client,
+                host,
+                port,
+                30_000
+            ).use { }
+        }
 
     private fun measureRtt(
         transport: TransportId,
@@ -176,25 +224,25 @@ class TransportRunner(private val log: PrintStream) {
             30_000
         ).use { session ->
             buildList {
-                RTT_PAYLOADS.forEach { payload ->
-                    val cpuStart = processCpuNanos()
+                cfg.rttPayloads.forEach { payload ->
                     repeat(RTT_WARMUP) {
                         session.ping(payload)
                     }
 
+                    val cpuStart = processCpuNanos()
                     val samples = LatencySamples()
                     repeat(cfg.rttMeasuredIterations) {
                         samples.add(session.ping(payload))
                     }
-
                     val cpuEnd = processCpuNanos()
+
                     add(
                         latencyMeasurement(
                             "rtt",
                             transport,
                             payload,
                             samples,
-                            cpuEnd - cpuStart
+                            cpuDeltaNanos(cpuStart, cpuEnd)
                         )
                     )
                 }
@@ -207,35 +255,32 @@ class TransportRunner(private val log: PrintStream) {
         host: String,
         port: Int,
         cfg: TransportConfig
-    ): TransportMeasurement {
-        val cpuStart = processCpuNanos()
-        return ClientSession.open(
+    ): TransportMeasurement =
+        ClientSession.open(
             client,
             host,
             port,
             30_000
         ).use { session ->
+            val cpuStart = processCpuNanos()
             val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             Thread.sleep(cfg.throughputDurationMillis)
             session.stopStreaming()
-            val wallNanos = await(outcome).wallNanos
-            val serverBytes = session.requestReport().get(
-                cfg.runTimeoutMillis,
-                TimeUnit.MILLISECONDS
-            )
+            val stream = await(outcome)
             val cpuEnd = processCpuNanos()
+            val stats = awaitStats(session.requestReport(), cfg.runTimeoutMillis)
 
             throughputMeasurement(
                 "throughput",
                 transport,
                 STREAM_CHUNK_BYTES,
-                serverBytes,
-                wallNanos,
-                cpuEnd - cpuStart,
-                hasIntegrityError(serverBytes, session)
+                stats.bytesReceived,
+                stream.wallNanos,
+                cpuDeltaNanos(cpuStart, cpuEnd),
+                integrityError(stats, session, stream.bytesWritten),
+                TimeUnit.MILLISECONDS.toNanos(cfg.throughputDurationMillis)
             )
         }
-    }
 
     private fun measureBidirectional(
         transport: TransportId,
@@ -243,28 +288,31 @@ class TransportRunner(private val log: PrintStream) {
         host: String,
         port: Int,
         cfg: TransportConfig
-    ): TransportMeasurement {
-        val cpuStart = processCpuNanos()
-        return ClientSession.open(
+    ): TransportMeasurement =
+        ClientSession.open(
             client,
             host,
             port,
             30_000
         ).use { session ->
+            val cpuStart = processCpuNanos()
             session.startServerStream(STREAM_CHUNK_BYTES)
 
             val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
             Thread.sleep(cfg.throughputDurationMillis)
             session.stopStreaming()
-            val wall = await(outcome).wallNanos
-            val serverBytes = session.requestReport().get(
-                cfg.runTimeoutMillis,
-                TimeUnit.MILLISECONDS
-            )
+            val stream = await(outcome)
+            val stopFuture = session.stopServerStream()
+            val stats = awaitStats(stopFuture, cfg.runTimeoutMillis)
             val cpuEnd = processCpuNanos()
-            val inbound = session.clientReceivedBytes
-            val total = serverBytes + inbound
-            val integrityError = hasIntegrityError(serverBytes, session)
+
+            val serverWallNanos =
+                (stats.endNanos - stats.startNanos).coerceAtLeast(0L)
+            val wall = maxOf(stream.wallNanos, serverWallNanos)
+            val clientToServer = stats.bytesReceived
+            val serverToClient = stats.bytesSent
+            val total = clientToServer + serverToClient
+            val integrityError = integrityError(stats, session, stream.bytesWritten)
             val mibPerSecond = mib(total, wall)
 
             BidirectionalMeasurementResult(
@@ -274,15 +322,14 @@ class TransportRunner(private val log: PrintStream) {
                 durationNanos = wall,
                 payloadBytesTransferred = total,
                 mibPerSecond = mibPerSecond,
-                processCpuNanos = cpuEnd - cpuStart,
+                processCpuNanos = cpuDeltaNanos(cpuStart, cpuEnd),
                 integrityError = integrityError,
-                serverToClientBytes = inbound,
-                clientToServerBytes = serverBytes,
-                serverToClientMibPerSecond = mib(inbound, wall),
-                clientToServerMibPerSecond = mib(serverBytes, wall)
+                serverToClientBytes = serverToClient,
+                clientToServerBytes = clientToServer,
+                serverToClientMibPerSecond = mib(serverToClient, wall),
+                clientToServerMibPerSecond = mib(clientToServer, wall)
             )
         }
-    }
 
     private fun measureLoadedLatency(
         transport: TransportId,
@@ -291,34 +338,37 @@ class TransportRunner(private val log: PrintStream) {
         port: Int,
         cfg: TransportConfig
     ): TransportMeasurement {
-        val cpuStart = processCpuNanos()
         return ClientSession.open(
             client,
             host,
             port,
             30_000
         ).use { session ->
-            val idle = LatencySamples()
-            repeat(30) {
-                idle.add(session.ping(LOADED_PING_BYTES))
-            }
-
-            val loaded = LatencySamples()
-            val deadline = System.nanoTime() +
-                    TimeUnit.MILLISECONDS.toNanos(cfg.throughputDurationMillis)
-            val outcome = session.startStreaming(STREAM_CHUNK_BYTES)
-            while (System.nanoTime() < deadline) {
-                Thread.sleep(LOADED_PING_INTERVAL_MILLIS)
-                loaded.add(session.ping(LOADED_PING_BYTES))
-            }
-            session.stopStreaming()
-            await(outcome)
-            val serverBytes = session.requestReport().get(
-                cfg.runTimeoutMillis,
-                TimeUnit.MILLISECONDS
+            val idleValues = pingSeries(
+                session,
+                LOADED_PING_BYTES,
+                LOADED_IDLE_SAMPLES,
+                LOADED_PING_INTERVAL_MILLIS
             )
-            val cpuEnd = processCpuNanos()
 
+            val cpuStart = processCpuNanos()
+            val streamFuture = session.startStreaming(STREAM_CHUNK_BYTES)
+            val loadedCount = (cfg.throughputDurationMillis / LOADED_PING_INTERVAL_MILLIS)
+                    .coerceAtLeast(1L)
+                    .toInt()
+            val loadedValues = pingSeries(
+                session,
+                LOADED_PING_BYTES,
+                loadedCount,
+                LOADED_PING_INTERVAL_MILLIS
+            )
+            session.stopStreaming()
+            val stream = await(streamFuture)
+            val cpuEnd = processCpuNanos()
+            val stats = awaitStats(session.requestReport(), cfg.runTimeoutMillis)
+
+            val idle = LatencySamples().also { s -> idleValues.forEach { s.add(it) } }
+            val loaded = LatencySamples().also { s -> loadedValues.forEach { s.add(it) } }
             val idleSummary = idle.summary()
             val loadedSummary = loaded.summary()
 
@@ -344,10 +394,49 @@ class TransportRunner(private val log: PrintStream) {
                 loadedP999Nanos = loadedSummary.p999Nanos,
                 bufferbloatP50Nanos = deltaNanos(idle, loaded, 0.50),
                 bufferbloatP99Nanos = deltaNanos(idle, loaded, 0.99),
-                processCpuNanos = cpuEnd - cpuStart,
-                streamMibPerSecond = mib(serverBytes, cfg.throughputDurationMillis * 1_000_000L),
-                integrityError = hasIntegrityError(serverBytes, session)
+                processCpuNanos = cpuDeltaNanos(cpuStart, cpuEnd),
+                streamMibPerSecond = mib(stats.bytesReceived, stream.wallNanos),
+                integrityError = integrityError(stats, session, stream.bytesWritten),
+                configuredDurationNanos = TimeUnit.MILLISECONDS.toNanos(
+                    cfg.throughputDurationMillis
+                )
             )
+        }
+    }
+
+    /**
+     * Issues [count] pings on an absolute {@code t0 + i * interval} schedule, keeping them concurrently
+     * in flight, then collects the round-trip samples. Because the next send time is never derived from
+     * the previous response, this avoids coordinated omission (B-013).
+     */
+    private fun pingSeries(
+        session: ClientSession,
+        payloadBytes: Int,
+        count: Int,
+        intervalMillis: Long
+    ): List<Long> {
+        val intervalNanos = TimeUnit.MILLISECONDS.toNanos(intervalMillis)
+        val startNanos = System.nanoTime()
+        val futures = ArrayList<CompletableFuture<Long>>(count)
+        repeat(count) { i ->
+            parkUntil(startNanos + i * intervalNanos)
+            futures.add(session.pingAsync(payloadBytes))
+        }
+        return futures.map { it.get(60, TimeUnit.SECONDS) }
+    }
+
+    private fun parkUntil(targetNanos: Long) {
+        while (true) {
+            val remaining = targetNanos - System.nanoTime()
+            if (remaining <= 0L) {
+                return
+            }
+
+            if (remaining > 1_000_000L) {
+                Thread.sleep(remaining / 1_000_000L - 1L)
+            } else {
+                Thread.onSpinWait()
+            }
         }
     }
 
@@ -356,24 +445,24 @@ class TransportRunner(private val log: PrintStream) {
         transport: TransportId,
         payloadBytes: Int,
         samples: LatencySamples,
-        cpuNanos: Long
-    ): LatencyMeasurementResult {
-        val s = samples.summary()
-        return LatencyMeasurementResult(
-            name = name,
-            transport = transport.label,
-            payloadBytes = payloadBytes,
-            samples = s.samples,
-            meanNanos = s.meanNanos,
-            minNanos = s.minNanos,
-            maxNanos = s.maxNanos,
-            p50Nanos = s.p50Nanos,
-            p95Nanos = s.p95Nanos,
-            p99Nanos = s.p99Nanos,
-            p999Nanos = s.p999Nanos,
-            processCpuNanos = cpuNanos
-        )
-    }
+        cpuNanos: Long?
+    ): LatencyMeasurementResult =
+        samples.summary().let { s ->
+            return LatencyMeasurementResult(
+                name = name,
+                transport = transport.label,
+                payloadBytes = payloadBytes,
+                samples = s.samples,
+                meanNanos = s.meanNanos,
+                minNanos = s.minNanos,
+                maxNanos = s.maxNanos,
+                p50Nanos = s.p50Nanos,
+                p95Nanos = s.p95Nanos,
+                p99Nanos = s.p99Nanos,
+                p999Nanos = s.p999Nanos,
+                processCpuNanos = cpuNanos
+            )
+        }
 
     private fun throughputMeasurement(
         name: String,
@@ -381,8 +470,9 @@ class TransportRunner(private val log: PrintStream) {
         payloadBytes: Int,
         transferred: Long,
         wallNanos: Long,
-        cpuNanos: Long,
-        integrityError: Boolean
+        cpuNanos: Long?,
+        integrityError: Boolean,
+        configuredDurationNanos: Long
     ): ThroughputMeasurementResult =
         ThroughputMeasurementResult(
             name = name,
@@ -392,7 +482,8 @@ class TransportRunner(private val log: PrintStream) {
             payloadBytesTransferred = transferred,
             mibPerSecond = mib(transferred, wallNanos),
             processCpuNanos = cpuNanos,
-            integrityError = integrityError
+            integrityError = integrityError,
+            configuredDurationNanos = configuredDurationNanos
         )
 
 }

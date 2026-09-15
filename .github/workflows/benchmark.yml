@@ -1,6 +1,10 @@
 name: benchmark
 
 # On-demand performance suite. Never part of the normal CI gate.
+#
+# NOTE (B-036): GitHub-hosted runners (ubuntu-latest) are shared, virtualized and
+# not a stable performance baseline. Treat every number produced here as indicative
+# only; use a dedicated, pinned bare-metal runner for real comparisons.
 on:
   workflow_dispatch:
     inputs:
@@ -24,19 +28,19 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "25"
 
       - name: Cache Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.gradle/caches
           key: gradle-${{ runner.os }}-benchmark
@@ -55,9 +59,9 @@ jobs:
         if: ${{ inputs.suite == 'transport' || inputs.suite == 'all' }}
         run: |
           if [ "${{ inputs.profile }}" = "quick" ]; then
-            ./gradlew :benchmark:transportBenchmark -PbenchmarkWorkload=3000 --stacktrace
+            ./gradlew :benchmark:transportBenchmark -PbenchmarkDuration=3000 -PbenchmarkIterations=3 --stacktrace
           else
-            ./gradlew :benchmark:transportBenchmark --stacktrace
+            ./gradlew :benchmark:transportBenchmark -PbenchmarkRepetitions=3 --stacktrace
           fi
 
       - name: Minecraft-shaped workloads
@@ -68,16 +72,20 @@ jobs:
         if: ${{ inputs.suite == 'all' }}
         run: |
           if [ "${{ inputs.profile }}" = "quick" ]; then
-            ./gradlew :benchmark:channelIntegration -PbenchmarkWorkload=3000 --stacktrace
+            ./gradlew :benchmark:channelIntegration -PbenchmarkDuration=3000 -PbenchmarkIterations=3 --stacktrace
           else
             ./gradlew :benchmark:channelIntegration --stacktrace
           fi
+
+      - name: Baseline warning
+        run: |
+          echo "::warning::GitHub-hosted runners are not a performance baseline. Do not compare these numbers across runs or machines."
 
       - name: Refresh report catalog
         if: always()
         run: ./gradlew :benchmark:benchmarkReport --stacktrace || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-results
