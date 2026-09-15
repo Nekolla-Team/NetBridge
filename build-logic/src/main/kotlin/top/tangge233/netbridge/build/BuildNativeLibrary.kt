@@ -27,6 +27,12 @@ abstract class BuildNativeLibrary @Inject constructor(
     @get:Input
     abstract val skipNativeBuild: Property<Boolean>
 
+    @get:Input
+    abstract val crateName: Property<String>
+
+    @get:Input
+    abstract val libraryBaseName: Property<String>
+
     @get:InputDirectory
     abstract val cargoDir: DirectoryProperty
 
@@ -36,6 +42,8 @@ abstract class BuildNativeLibrary @Inject constructor(
     init {
         profile.convention("debug")
         skipNativeBuild.convention(false)
+        crateName.convention("net-bridge-native")
+        libraryBaseName.convention("net_bridge_native")
         onlyIf { !skipNativeBuild.get() }
     }
 
@@ -46,8 +54,20 @@ abstract class BuildNativeLibrary @Inject constructor(
             throw GradleException("nativeProfile must be debug or release, got: $prof")
         }
 
+        val crate = crateName.get()
+        if (crate.isBlank()) {
+            throw GradleException("crateName must not be blank")
+        }
+
+        val base = libraryBaseName.get()
+        if (base.isBlank()) {
+            throw GradleException("libraryBaseName must not be blank")
+        }
+
+        val artifact = NativePlatform.cdylibNameFor(base)
+
         val cargoDirectory = cargoDir.get().asFile
-        val cargoArgs = mutableListOf("cargo", "build", "-p", "net-bridge-native")
+        val cargoArgs = mutableListOf("cargo", "build", "-p", crate)
         if (prof == "release") {
             cargoArgs.add("--release")
         }
@@ -60,20 +80,21 @@ abstract class BuildNativeLibrary @Inject constructor(
             throw GradleException("cargo build failed with exit code ${execResult.exitValue}")
         }
 
-        val srcCdylib = cargoDirectory.resolve("target/$prof/${NativePlatform.cdylibName}")
+        val srcCdylib = cargoDirectory.resolve("target/$prof/$artifact")
         if (!srcCdylib.exists()) {
             throw GradleException("Rust cdylib not found after cargo build: $srcCdylib")
         }
 
         val targetDir = outputDir.get().asFile.resolve(NativePlatform.subdir)
         targetDir.mkdirs()
-        val dst = targetDir.resolve(NativePlatform.cdylibName)
+
+        val dst = targetDir.resolve(artifact)
         Files.copy(
             srcCdylib.toPath(),
             dst.toPath(),
             StandardCopyOption.REPLACE_EXISTING
         )
-        logger.lifecycle("copied native ($prof): $srcCdylib -> $dst")
+        logger.lifecycle("copied native ($crate, $prof): $srcCdylib -> $dst")
     }
 
 }

@@ -61,6 +61,9 @@
     <Properties>
       <option name="KEEP_BLANK_LINES" value="true" />
     </Properties>
+    <XML>
+      <option name="XML_ATTRIBUTE_WRAP" value="4" />
+    </XML>
     <codeStyleSettings language="JAVA">
       <option name="RIGHT_MARGIN" value="100" />
       <option name="BLANK_LINES_AFTER_CLASS_HEADER" value="1" />

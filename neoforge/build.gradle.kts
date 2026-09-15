@@ -8,6 +8,7 @@ plugins {
 dependencies {
     implementation(project(":common"))
     implementation(libs.mixin)
+    implementation(libs.jackson.core)
 }
 
 val embeddedLibraries = configurations.create("embeddedLibraries") {

@@ -146,6 +146,7 @@ fabric.properties
 /.idea/*
 
 !.idea/codeStyles
+!.idea/inspectionProfiles
 !.idea/runConfigurations
 
 ### Linux ###
@@ -260,3 +261,10 @@ $RECYCLE.BIN/
 
 
 .codegraph/
+
+# NetBridge benchmark suite results (never committed)
+benchmark/build/
+benchmark-results/
+
+# JTE generated template classes (gg.jte Gradle plugin default output)
+jte-classes/

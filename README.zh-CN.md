@@ -120,12 +120,21 @@ make clean
 ./gradlew test                                  # 纯 Java 测试（无需 native）
 cargo test --workspace                          # Rust core/native 测试
 ./gradlew :common:nativeIntegrationTest         # FFM 集成测试（QUIC/KCP 回环）
-./gradlew :common:ffmBenchmark                  # FFM 数据面基准
 ./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest
 ```
 
-公共 C ABI 头（`rust/crates/net-bridge-native/include/netbridge.h`）由固定版本 cbindgen 从 Rust ABI
-定义**生成**并随仓库提交，禁止手工编辑：
+Benchmark 位于独立的 `:benchmark` 子模块（按需使用，绝不进入 `check`/`test`/CI）：
+
+```bash
+./gradlew :benchmark:jmh                         # 全部 JMH 微基准
+./gradlew :benchmark:transportBenchmark          # L2 transport 对比（TCP/QUIC/KCP）
+./gradlew :benchmark:minecraftTraffic            # Minecraft 形态流量对比
+```
+
+完整使用说明见 `docs/benchmarks/README.md`。
+
+公共 C ABI 头（`rust/crates/net-bridge-native/include/netbridge.h`）由固定版本 cbindgen 从 Rust ABI 定义
+**生成**并随仓库提交，禁止手工编辑：
 
 ```bash
 ./gradlew updateNativeHeader                     # Rust ABI 变更后重新生成

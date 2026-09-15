@@ -642,6 +642,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-bridge-benchmark-native"
+version = "0.1.0"
+
+[[package]]
 name = "net-bridge-core"
 version = "0.1.0"
 dependencies = [
