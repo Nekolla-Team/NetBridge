@@ -12,25 +12,21 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "chore(deps)"
-    groups:
-      gradle-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
     ignore:
+      # Netty is pinned to the version bundled by Minecraft 1.21.1; the mods
+      # load the game's copy at runtime, so never bump it.
+      - dependency-name: "io.netty:*"
       # Mod toolchain pinned to the Minecraft 1.21.1 line: patch only.
       - dependency-name: "com.mojang:minecraft"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
       - dependency-name: "net.fabricmc:fabric-loader"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
       - dependency-name: "net.fabricmc:sponge-mixin"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
       - dependency-name: "fabric-loom"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
       - dependency-name: "net.neoforged.moddev"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
 
   # Rust workspace (rust/Cargo.toml + Cargo.lock)
   - package-ecosystem: "cargo"
@@ -44,19 +40,12 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "chore(deps)"
-    groups:
-      cargo-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
     ignore:
       # Pre-1.0: a 0.x minor bump is breaking; update these by hand.
       - dependency-name: "kcp-rs"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
       - dependency-name: "smux"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        update-types: [ "version-update:semver-major", "version-update:semver-minor" ]
 
   # GitHub Actions used by .github/workflows
   - package-ecosystem: "github-actions"
@@ -70,10 +59,3 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "ci(deps)"
-    groups:
-      actions-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
