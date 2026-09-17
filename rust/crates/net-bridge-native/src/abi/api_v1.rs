@@ -5,7 +5,6 @@ use std::slice;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use net_bridge_core::context::CONTEXT_STATE_CLOSED;
 use net_bridge_core::{BridgeError, NativeContext};
 
@@ -24,7 +23,8 @@ pub static API_V1: NbApiV1 = NbApiV1 {
         | NB_FEATURE_KCP
         | NB_FEATURE_WRITABLE_EVENT
         | NB_FEATURE_BINARY_SOCKET_ADDRESS
-        | NB_FEATURE_SERVER_STATE_EVENT,
+        | NB_FEATURE_SERVER_STATE_EVENT
+        | NB_FEATURE_SHARED_RING_IO,
 
     context_create: Some(context_create),
     context_shutdown: Some(context_shutdown),
@@ -41,7 +41,10 @@ pub static API_V1: NbApiV1 = NbApiV1 {
     server_port: Some(server_port),
     server_stop: Some(server_stop),
 
-    reserved: [0; 8],
+    connection_io_region: Some(connection_io_region),
+    connection_io_kick: Some(connection_io_kick),
+
+    reserved: [0; 6],
 };
 
 /// Returns the net-bridge C ABI v1 function table.
@@ -105,7 +108,7 @@ unsafe extern "C" fn context_create(
             }
         }
 
-        let worker_threads = if !options.is_null() {
+        let (worker_threads, shared_io_tx_capacity, shared_io_rx_capacity) = if !options.is_null() {
             let opt_size = unsafe { std::ptr::read_unaligned(options as *const u32) };
             if opt_size < NB_CONTEXT_OPTIONS_V1_MIN_SIZE {
                 return NB_INVALID_ARGUMENT;
@@ -122,22 +125,35 @@ unsafe extern "C" fn context_create(
             if reserved0 != 0 {
                 return NB_INVALID_ARGUMENT;
             }
+            let mut tx_capacity = 0u32;
+            let mut rx_capacity = 0u32;
             if opt_size >= size_of::<NbContextOptionsV1>() as u32 {
+                tx_capacity = unsafe {
+                    std::ptr::read_unaligned((options as *const u8).add(16) as *const u32)
+                };
+                rx_capacity = unsafe {
+                    std::ptr::read_unaligned((options as *const u8).add(20) as *const u32)
+                };
                 let reserved_slice = unsafe {
-                    let p = (options as *const u8).add(16) as *const u64;
-                    slice::from_raw_parts(p, 4)
+                    let p = (options as *const u8).add(24) as *const u64;
+                    slice::from_raw_parts(p, 3)
                 };
                 if reserved_slice.iter().any(|&r| r != 0) {
                     return NB_INVALID_ARGUMENT;
                 }
             }
-            wt as usize
+            (wt as usize, tx_capacity as usize, rx_capacity as usize)
         } else {
-            0
+            (0, 0, 0)
         };
 
         let sink = Arc::new(CAbiEventSink::new(event_callback));
-        match NativeContext::new(worker_threads, Some(sink)) {
+        match NativeContext::new_with_shared_io_capacities(
+            worker_threads,
+            Some(sink),
+            shared_io_tx_capacity,
+            shared_io_rx_capacity,
+        ) {
             Ok(ctx) => {
                 unsafe {
                     *out_context = Box::into_raw(Box::new(NbContext(ctx)));
@@ -309,15 +325,14 @@ unsafe extern "C" fn connection_write(
         if length > 65536 {
             return NB_INVALID_ARGUMENT;
         }
-        let bytes = if length == 0 {
-            Bytes::new()
+        let payload: &[u8] = if length == 0 {
+            &[]
         } else {
-            let slice = unsafe { slice::from_raw_parts(data, length as usize) };
-            Bytes::copy_from_slice(slice)
+            unsafe { slice::from_raw_parts(data, length as usize) }
         };
 
         let ctx = unsafe { &(*context).0 };
-        match ctx.write_chunk(connection, bytes) {
+        match ctx.write_chunk_legacy(connection, payload) {
             Ok(n) => {
                 unsafe {
                     *out_written = n as u32;
@@ -351,15 +366,15 @@ unsafe extern "C" fn connection_read(
             return NB_INVALID_ARGUMENT;
         }
 
+        let dst: &mut [u8] = if capacity == 0 {
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(data, capacity as usize) }
+        };
+
         let ctx = unsafe { &(*context).0 };
-        match ctx.read_chunk(connection, capacity as usize) {
-            Ok(bytes) => {
-                let n = bytes.len();
-                if n > 0 {
-                    unsafe {
-                        slice::from_raw_parts_mut(data, n).copy_from_slice(&bytes);
-                    }
-                }
+        match ctx.read_chunk_legacy(connection, dst) {
+            Ok(n) => {
                 unsafe {
                     *out_read = n as u32;
                 }
@@ -384,6 +399,62 @@ unsafe extern "C" fn connection_close(context: *mut NbContext, connection: u64) 
             NB_OK
         } else {
             NB_NOT_FOUND
+        }
+    })
+}
+
+unsafe extern "C" fn connection_io_region(
+    context: *mut NbContext,
+    connection: u64,
+    out_region: *mut NbSharedIoRegionV1,
+) -> NbStatus {
+    ffi_guard(|| {
+        if context.is_null() || out_region.is_null() || connection == 0 {
+            return NB_INVALID_ARGUMENT;
+        }
+        let ctx = unsafe { &(*context).0 };
+        match ctx.connection_io_region(connection) {
+            Ok(region) => {
+                let descriptor = NbSharedIoRegionV1 {
+                    struct_size: size_of::<NbSharedIoRegionV1>() as u32,
+                    flags: NB_SHARED_IO_REGION_RUST_OWNED,
+                    layout_version: region.layout_version,
+                    tx_base: region.tx_base as *mut u8,
+                    tx_total_bytes: region.tx_total_bytes as u64,
+                    tx_capacity: region.tx_capacity as u64,
+                    rx_base: region.rx_base as *mut u8,
+                    rx_total_bytes: region.rx_total_bytes as u64,
+                    rx_capacity: region.rx_capacity as u64,
+                    reserved: [0; 4],
+                };
+                unsafe {
+                    std::ptr::write(out_region, descriptor);
+                }
+                NB_OK
+            }
+            Err(e) => map_error(e),
+        }
+    })
+}
+
+unsafe extern "C" fn connection_io_kick(
+    context: *mut NbContext,
+    connection: u64,
+    flags: u32,
+) -> NbStatus {
+    ffi_guard(|| {
+        if context.is_null() || connection == 0 {
+            return NB_INVALID_ARGUMENT;
+        }
+        if flags == 0 || (flags & !(NB_IO_KICK_TX_DATA | NB_IO_KICK_RX_SPACE)) != 0 {
+            return NB_INVALID_ARGUMENT;
+        }
+        let ctx = unsafe { &(*context).0 };
+        let tx_data = flags & NB_IO_KICK_TX_DATA != 0;
+        let rx_space = flags & NB_IO_KICK_RX_SPACE != 0;
+        match ctx.connection_io_kick(connection, tx_data, rx_space) {
+            Ok(()) => NB_OK,
+            Err(e) => map_error(e),
         }
     })
 }

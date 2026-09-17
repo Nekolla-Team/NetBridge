@@ -83,6 +83,21 @@ public final class FfmNativeLibrary implements AutoCloseable {
     }
 
     public FfmNativeContext createContext(int workerThreads) {
+        return createContext(workerThreads, 0, 0);
+    }
+
+    /**
+     * Creates a context, optionally selecting the per-connection shared-ring capacities.
+     *
+     * <p>The capacities are only forwarded when the native table advertises
+     * {@code FEATURE_SHARED_RING_IO}; otherwise zero is sent so older natives never observe
+     * non-zero reserved bytes. A zero capacity selects the native default (128 KiB).
+     */
+    public FfmNativeContext createContext(
+            int workerThreads,
+            int sharedIoTxCapacity,
+            int sharedIoRxCapacity
+    ) {
         synchronized (stateLock) {
             if (state != State.OPEN) {
                 throw new IllegalStateException("FfmNativeLibrary is " + state);
@@ -140,6 +155,22 @@ public final class FfmNativeLibrary implements AutoCloseable {
                     ),
                     workerThreads
             );
+            if (api.supportsSharedRingIo()) {
+                options.set(
+                        ValueLayout.JAVA_INT,
+                        FfmApiLayouts.CONTEXT_OPTIONS_V1.byteOffset(
+                                MemoryLayout.PathElement.groupElement("shared_io_tx_capacity")
+                        ),
+                        sharedIoTxCapacity
+                );
+                options.set(
+                        ValueLayout.JAVA_INT,
+                        FfmApiLayouts.CONTEXT_OPTIONS_V1.byteOffset(
+                                MemoryLayout.PathElement.groupElement("shared_io_rx_capacity")
+                        ),
+                        sharedIoRxCapacity
+                );
+            }
 
             var outContext = localArena.allocate(ValueLayout.ADDRESS);
             var status = (int) api.contextCreate().invokeExact(

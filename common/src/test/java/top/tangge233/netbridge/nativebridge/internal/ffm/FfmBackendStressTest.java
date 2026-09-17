@@ -13,11 +13,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
-
 import org.jspecify.annotations.NonNull;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class FfmBackendStressTest {
 
@@ -70,47 +68,74 @@ class FfmBackendStressTest {
                     );
 
             var total = (long) BURST_CHUNKS * CHUNK_BYTES;
-            var written = new AtomicLong();
-            IntStream.range(0, BURST_CHUNKS)
-                    .forEach(i -> {
-                        var res = client.write(ByteBuffer.wrap(chunk));
-                        assertEquals(
-                                NativeIoResult.progressed(CHUNK_BYTES),
-                                res,
-                                "burst write " + i
-                        );
-                        written.addAndGet(CHUNK_BYTES);
-                    });
-            assertEquals(total, written.get());
+
+            // The bounded ring applies backpressure, so the peer must drain concurrently while the
+            // burst is written; otherwise the pipeline legitimately stalls at ring capacity.
+            var got = new AtomicLong();
+            var mismatch = new AtomicReference<String>();
+            var drainDone = new CountDownLatch(1);
+            var reader = Thread.ofPlatform().start(() -> {
+                try {
+                    var received = ByteBuffer.allocate(CHUNK_BYTES);
+                    long n = 0;
+                    var readDeadline = System.currentTimeMillis() + 30_000;
+                    while (n < total && System.currentTimeMillis() < readDeadline) {
+                        var res = serverConn.read(received);
+                        if (res.progressed()) {
+                            for (var i = 0; i < res.bytes(); i++) {
+                                if ((byte) ((n + i) % CHUNK_BYTES & 0xFF) != received.get(i)) {
+                                    mismatch.set("Byte stream mismatch at " + (n + i));
+                                    return;
+                                }
+                            }
+                            n += res.bytes();
+                            received.clear();
+                        } else {
+                            Thread.sleep(1);
+                        }
+                    }
+                    got.set(n);
+                } catch (Exception e) {
+                    mismatch.set("reader failed: " + e);
+                } finally {
+                    drainDone.countDown();
+                }
+            });
+
+            long written = 0;
+            var writeDeadline = System.currentTimeMillis() + 30_000;
+            for (var i = 0; i < BURST_CHUNKS; i++) {
+                while (true) {
+                    var res = client.write(ByteBuffer.wrap(chunk));
+                    if (res.progressed()) {
+                        written += res.bytes();
+                        break;
+                    }
+                    assertTrue(
+                            res.wouldBlock(),
+                            "burst write " + i + " must progress or block: " + res
+                    );
+                    assertTrue(
+                            System.currentTimeMillis() < writeDeadline,
+                            "burst write stalled at chunk " + i
+                    );
+                    Thread.sleep(1);
+                }
+            }
+            assertEquals(total, written);
 
             assertTrue(
                     drainRequested.await(10, TimeUnit.SECONDS),
                     "At least one DATA_AVAILABLE event should be received (events may be coalesced)"
             );
-
-            var received = ByteBuffer.allocate(CHUNK_BYTES);
-            var got = 0L;
-            var readDeadline = System.currentTimeMillis() + 30_000;
-            while (got < total && System.currentTimeMillis() < readDeadline) {
-                var res = serverConn.read(received);
-                if (res.progressed()) {
-                    for (var i = 0; i < res.bytes(); i++) {
-                        assertEquals(
-                                (byte) ((got + i) % CHUNK_BYTES & 0xFF), received.get(i),
-                                "Byte stream mismatch at " + (got + i)
-                        );
-                    }
-                    got += res.bytes();
-                    received.clear();
-                } else {
-                    Thread.sleep(5);
-                }
-            }
+            assertTrue(drainDone.await(35, TimeUnit.SECONDS), "drain did not complete");
+            assertNull(mismatch.get(), mismatch.get());
             assertEquals(
                     total,
-                    got,
+                    got.get(),
                     "No bytes may be lost during a callback storm"
             );
+            reader.join(5_000);
 
             server.close();
             client.close();

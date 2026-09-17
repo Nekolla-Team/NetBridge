@@ -27,7 +27,9 @@ public final class FfmApiLayouts {
             ValueLayout.JAVA_INT.withName("flags"),
             ValueLayout.JAVA_INT.withName("worker_threads"),
             ValueLayout.JAVA_INT.withName("reserved0"),
-            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_LONG).withName("reserved")
+            ValueLayout.JAVA_INT.withName("shared_io_tx_capacity"),
+            ValueLayout.JAVA_INT.withName("shared_io_rx_capacity"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_LONG).withName("reserved")
     ).withName("nb_context_options_v1");
 
     public static final StructLayout CALLBACKS_V1 = MemoryLayout.structLayout(
@@ -63,6 +65,19 @@ public final class FfmApiLayouts {
             MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_LONG).withName("reserved")
     ).withName("nb_server_options_v1");
 
+    public static final StructLayout SHARED_IO_REGION_V1 = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("struct_size"),
+            ValueLayout.JAVA_INT.withName("flags"),
+            ValueLayout.JAVA_LONG.withName("layout_version"),
+            ValueLayout.ADDRESS.withName("tx_base"),
+            ValueLayout.JAVA_LONG.withName("tx_total_bytes"),
+            ValueLayout.JAVA_LONG.withName("tx_capacity"),
+            ValueLayout.ADDRESS.withName("rx_base"),
+            ValueLayout.JAVA_LONG.withName("rx_total_bytes"),
+            ValueLayout.JAVA_LONG.withName("rx_capacity"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_LONG).withName("reserved")
+    ).withName("nb_shared_io_region_v1");
+
     public static final StructLayout API_HEADER_V1 = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("abi_major"),
             ValueLayout.JAVA_INT.withName("abi_minor"),
@@ -93,7 +108,10 @@ public final class FfmApiLayouts {
             ValueLayout.ADDRESS.withName("server_port"),
             ValueLayout.ADDRESS.withName("server_stop"),
 
-            MemoryLayout.sequenceLayout(8, ValueLayout.JAVA_LONG).withName("reserved")
+            ValueLayout.ADDRESS.withName("connection_io_region"),
+            ValueLayout.ADDRESS.withName("connection_io_kick"),
+
+            MemoryLayout.sequenceLayout(6, ValueLayout.JAVA_LONG).withName("reserved")
     ).withName("nb_api_v1");
 
     /* === Function Descriptors === */
@@ -195,7 +213,22 @@ public final class FfmApiLayouts {
             ValueLayout.JAVA_LONG
     );
 
+    public static final FunctionDescriptor CONNECTION_IO_REGION_DESC = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_LONG,
+            ValueLayout.ADDRESS
+    );
+
+    public static final FunctionDescriptor CONNECTION_IO_KICK_DESC = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_INT
+    );
+
     private FfmApiLayouts() {
+        super();
     }
 
 }

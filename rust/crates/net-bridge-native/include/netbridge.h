@@ -26,7 +26,7 @@
 /*
  C ABI minor version.
  */
-#define NB_ABI_MINOR 0
+#define NB_ABI_MINOR 1
 
 /*
  Supports the QUIC transport.
@@ -52,6 +52,27 @@
  Emits `NB_EVENT_SERVER_STATE` for server lifecycle transitions.
  */
 #define NB_FEATURE_SERVER_STATE_EVENT (1 << 4)
+
+/*
+ Exposes per-connection shared-memory IO region descriptors and edge kick control.
+ */
+#define NB_FEATURE_SHARED_RING_IO (1 << 5)
+
+/*
+ `nb_shared_io_region_v1_t` flag: the region memory is owned by Rust and must not be freed by the
+ consumer.
+ */
+#define NB_SHARED_IO_REGION_RUST_OWNED (1 << 0)
+
+/*
+ `connection_io_kick` flag: wake the transport consumer waiting for TX data.
+ */
+#define NB_IO_KICK_TX_DATA (1 << 0)
+
+/*
+ `connection_io_kick` flag: wake the transport producer waiting for RX space.
+ */
+#define NB_IO_KICK_RX_SPACE (1 << 1)
 
 /*
  QUIC transport kind selector.
@@ -193,7 +214,9 @@ typedef int32_t nb_status_t;
 /*
  Native context creation options.
 
- A zero value for `worker_threads` selects the runtime default.
+ A zero value for `worker_threads` selects the runtime default. The shared-IO ring capacities are
+ only consumed when `NB_FEATURE_SHARED_RING_IO` is advertised; a zero capacity selects the
+ native default. Older peers treat both fields as reserved zero.
  */
 typedef struct {
   /*
@@ -213,9 +236,17 @@ typedef struct {
    */
   uint32_t reserved0;
   /*
+   Per-connection Java -> transport ring capacity in bytes; 0 selects the default.
+   */
+  uint32_t shared_io_tx_capacity;
+  /*
+   Per-connection transport -> Java ring capacity in bytes; 0 selects the default.
+   */
+  uint32_t shared_io_rx_capacity;
+  /*
    Reserved for ABI growth; must be zero.
    */
-  uint64_t reserved[4];
+  uint64_t reserved[3];
 } nb_context_options_v1_t;
 
 /*
@@ -399,6 +430,55 @@ typedef struct {
 typedef uint64_t nb_server_t;
 
 /*
+ Per-connection shared IO ring descriptor returned by `connection_io_region`.
+
+ The two regions are Rust-owned; the consumer must only borrow the mapped memory until the
+ connection is closed. `layout_version` is `major << 32 | minor` and must match the ring header.
+ */
+typedef struct {
+  /*
+   Size of the caller-provided struct in bytes.
+   */
+  uint32_t struct_size;
+  /*
+   Bit set of `NB_SHARED_IO_REGION_*` flags.
+   */
+  uint32_t flags;
+  /*
+   Ring layout version (`major << 32 | minor`).
+   */
+  uint64_t layout_version;
+  /*
+   Base address of the Java -> transport ring region (header + data).
+   */
+  uint8_t *tx_base;
+  /*
+   Total mapped size of the TX region in bytes (`header + capacity`).
+   */
+  uint64_t tx_total_bytes;
+  /*
+   Usable TX capacity in bytes.
+   */
+  uint64_t tx_capacity;
+  /*
+   Base address of the transport -> Java ring region (header + data).
+   */
+  uint8_t *rx_base;
+  /*
+   Total mapped size of the RX region in bytes (`header + capacity`).
+   */
+  uint64_t rx_total_bytes;
+  /*
+   Usable RX capacity in bytes.
+   */
+  uint64_t rx_capacity;
+  /*
+   Reserved for ABI growth; must be zero.
+   */
+  uint64_t reserved[4];
+} nb_shared_io_region_v1_t;
+
+/*
  Versioned function table returned by `netbridge_get_api`.
 
  The struct is append-only: new functions are only ever added to the trailing reserved area across
@@ -497,9 +577,23 @@ typedef struct {
   nb_status_t (*server_stop)(nb_context_t *context,
                              nb_server_t server);
   /*
+   Query the per-connection shared IO ring descriptor. Present when
+   `NB_FEATURE_SHARED_RING_IO` is set; NULL otherwise.
+   */
+  nb_status_t (*connection_io_region)(nb_context_t *context,
+                                      nb_connection_t connection,
+                                      nb_shared_io_region_v1_t *out_region);
+  /*
+   Edge-kick a shared-direct connection's transport driver. Present when
+   `NB_FEATURE_SHARED_RING_IO` is set; NULL otherwise.
+   */
+  nb_status_t (*connection_io_kick)(nb_context_t *context,
+                                    nb_connection_t connection,
+                                    uint32_t flags);
+  /*
    Reserved for ABI growth; must be zero.
    */
-  uint64_t reserved[8];
+  uint64_t reserved[6];
 } nb_api_v1_t;
 
 #define NB_OK 0

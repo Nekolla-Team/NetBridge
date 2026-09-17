@@ -145,14 +145,16 @@ async fn serve_incoming_in_context(
 
     let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
-    let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
+    let Ok((shared_io, driver)) = ctx.create_connection_io() else {
+        conn_counter.fetch_sub(1, Ordering::Relaxed);
+        conn.close(0u32.into(), b"shared io allocation failed");
+        return;
+    };
 
     let handle = crate::ConnHandle::new(
         state.clone(),
-        to_java_rx,
-        to_transport_tx.clone(),
         cancel_tx,
+        Arc::clone(&shared_io),
         Some(server_id),
         Some(conn_counter.clone()),
         true,
@@ -168,19 +170,9 @@ async fn serve_incoming_in_context(
 
     ctx.set_conn_remote_addr(conn_id, peer);
     let accept_ctx = Arc::clone(&ctx);
-    let to_transport_tx_runner = to_transport_tx;
     ctx.spawn_connection_task("quic stream accept and drive", conn_id, async move {
         super::connection::run_connection_with_sink(
-            conn_id,
-            conn,
-            cancel_rx,
-            send,
-            recv,
-            to_transport_rx,
-            to_java_tx,
-            to_transport_tx_runner,
-            state,
-            accept_ctx,
+            conn_id, conn, cancel_rx, send, recv, driver, shared_io, state, accept_ctx,
         )
         .await;
     });

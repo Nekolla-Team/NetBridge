@@ -31,6 +31,9 @@ fn abi_struct_sizes_and_offsets() {
     assert_eq!(size_of::<NbContextOptionsV1>(), 48);
     assert_eq!(offset_of!(NbContextOptionsV1, struct_size), 0);
     assert_eq!(offset_of!(NbContextOptionsV1, worker_threads), 8);
+    assert_eq!(offset_of!(NbContextOptionsV1, shared_io_tx_capacity), 16);
+    assert_eq!(offset_of!(NbContextOptionsV1, shared_io_rx_capacity), 20);
+    assert_eq!(offset_of!(NbContextOptionsV1, reserved), 24);
 
     assert_eq!(size_of::<NbCallbacksV1>(), 48);
     assert_eq!(offset_of!(NbCallbacksV1, on_event), 8);
@@ -45,6 +48,18 @@ fn abi_struct_sizes_and_offsets() {
     assert_eq!(offset_of!(NbServerOptionsV1, transport_kind), 4);
     assert_eq!(offset_of!(NbServerOptionsV1, bind_host_utf8), 8);
 
+    assert_eq!(size_of::<NbSharedIoRegionV1>(), 96);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, struct_size), 0);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, flags), 4);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, layout_version), 8);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, tx_base), 16);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, tx_total_bytes), 24);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, tx_capacity), 32);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, rx_base), 40);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, rx_total_bytes), 48);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, rx_capacity), 56);
+    assert_eq!(offset_of!(NbSharedIoRegionV1, reserved), 64);
+
     assert_eq!(size_of::<NbApiV1>(), 184);
     assert_eq!(offset_of!(NbApiV1, abi_major), 0);
     assert_eq!(offset_of!(NbApiV1, abi_minor), 4);
@@ -54,6 +69,9 @@ fn abi_struct_sizes_and_offsets() {
     assert_eq!(offset_of!(NbApiV1, connect), 48);
     assert_eq!(offset_of!(NbApiV1, connection_write), 72);
     assert_eq!(offset_of!(NbApiV1, server_start), 96);
+    assert_eq!(offset_of!(NbApiV1, connection_io_region), 120);
+    assert_eq!(offset_of!(NbApiV1, connection_io_kick), 128);
+    assert_eq!(offset_of!(NbApiV1, reserved), 136);
 }
 
 #[test]
@@ -67,8 +85,11 @@ fn get_api_bootstrap_negotiation() {
 
     let api = unsafe { &*api_ptr };
     assert_eq!(api.abi_major, 1);
-    assert_eq!(api.abi_minor, 0);
+    assert_eq!(api.abi_minor, 1);
     assert_eq!(api.struct_size, size_of::<NbApiV1>() as u32);
+    assert!(api.feature_bits & NB_FEATURE_SHARED_RING_IO != 0);
+    assert!(api.connection_io_region.is_some());
+    assert!(api.connection_io_kick.is_some());
 
     // Major mismatch
     let mut bad_ptr: *const NbApiV1 = ptr::null();
@@ -186,6 +207,147 @@ fn c_abi_quic_loopback_roundtrip() {
     assert_eq!(written, msg.len() as u32);
 
     // 6. Close and destroy
+    assert_eq!(
+        unsafe { (api.connection_close.unwrap())(ctx, client_id) },
+        NB_OK
+    );
+    assert_eq!(unsafe { (api.server_stop.unwrap())(ctx, server_id) }, NB_OK);
+    assert_eq!(unsafe { (api.context_shutdown.unwrap())(ctx, 2000) }, NB_OK);
+    assert_eq!(unsafe { (api.context_destroy.unwrap())(ctx) }, NB_OK);
+}
+
+#[test]
+fn shared_ring_io_descriptor_and_kick() {
+    use net_bridge_shared_io::RING_HEADER_BYTES;
+
+    let mut api_ptr: *const NbApiV1 = ptr::null();
+    assert_eq!(unsafe { netbridge_get_api(1, 0, &mut api_ptr) }, NB_OK);
+    let api = unsafe { &*api_ptr };
+    assert_eq!(api.abi_minor, 1);
+
+    let callbacks = NbCallbacksV1 {
+        struct_size: size_of::<NbCallbacksV1>() as u32,
+        reserved0: 0,
+        on_event: Some(test_on_event),
+        reserved: [0; 4],
+    };
+    let mut ctx: *mut NbContext = ptr::null_mut();
+    assert_eq!(
+        unsafe { (api.context_create.unwrap())(ptr::null(), &callbacks, &mut ctx) },
+        NB_OK
+    );
+
+    let server_opts = NbServerOptionsV1 {
+        struct_size: size_of::<NbServerOptionsV1>() as u32,
+        transport_kind: NB_TRANSPORT_QUIC,
+        bind_host_utf8: NbBytesViewV1 {
+            data: ptr::null(),
+            length: 0,
+            reserved0: 0,
+        },
+        port: 0,
+        reserved0: 0,
+        max_connections: 8,
+        kcp_profile: 0,
+        flags: 0,
+        reserved1: 0,
+        reserved: [0; 4],
+    };
+    let mut server_id: u64 = 0;
+    assert_eq!(
+        unsafe { (api.server_start.unwrap())(ctx, &server_opts, &mut server_id) },
+        NB_OK
+    );
+    let mut port: u16 = 0;
+    assert_eq!(
+        unsafe { (api.server_port.unwrap())(ctx, server_id, &mut port) },
+        NB_OK
+    );
+
+    let host = b"127.0.0.1";
+    let connect_opts = NbConnectOptionsV1 {
+        struct_size: size_of::<NbConnectOptionsV1>() as u32,
+        transport_kind: NB_TRANSPORT_QUIC,
+        host_utf8: NbBytesViewV1 {
+            data: host.as_ptr(),
+            length: host.len() as u32,
+            reserved0: 0,
+        },
+        port,
+        reserved0: 0,
+        kcp_profile: 0,
+        flags: 0,
+        reserved: [0; 4],
+    };
+    let mut client_id: u64 = 0;
+    assert_eq!(
+        unsafe { (api.connect.unwrap())(ctx, &connect_opts, &mut client_id) },
+        NB_OK
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut state: u32 = 0;
+        let s_res = unsafe { (api.connection_state.unwrap())(ctx, client_id, &mut state) };
+        if s_res == NB_OK && state == NB_CONNECTION_CONNECTED {
+            break;
+        }
+        assert!(Instant::now() < deadline, "timeout waiting for connection");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut region = NbSharedIoRegionV1 {
+        struct_size: 0,
+        flags: 0,
+        layout_version: 0,
+        tx_base: ptr::null_mut(),
+        tx_total_bytes: 0,
+        tx_capacity: 0,
+        rx_base: ptr::null_mut(),
+        rx_total_bytes: 0,
+        rx_capacity: 0,
+        reserved: [0; 4],
+    };
+    let io_region = api.connection_io_region.expect("connection_io_region");
+    assert_eq!(unsafe { io_region(ctx, client_id, &mut region) }, NB_OK);
+    assert_eq!(region.struct_size as usize, size_of::<NbSharedIoRegionV1>());
+    assert_eq!(region.flags, NB_SHARED_IO_REGION_RUST_OWNED);
+    assert_eq!(region.layout_version, 1u64 << 32);
+    assert!(!region.tx_base.is_null());
+    assert!(!region.rx_base.is_null());
+    assert!(region.tx_capacity.is_power_of_two());
+    assert!(region.rx_capacity.is_power_of_two());
+    assert!(region.tx_capacity >= 64 * 1024);
+    assert!(region.rx_capacity >= 64 * 1024);
+    assert_eq!(
+        region.tx_total_bytes,
+        region.tx_capacity + RING_HEADER_BYTES as u64
+    );
+    assert_eq!(
+        region.rx_total_bytes,
+        region.rx_capacity + RING_HEADER_BYTES as u64
+    );
+
+    let io_kick = api.connection_io_kick.expect("connection_io_kick");
+    assert_eq!(
+        unsafe { io_kick(ctx, client_id, NB_IO_KICK_TX_DATA | NB_IO_KICK_RX_SPACE) },
+        NB_OK
+    );
+    assert_eq!(unsafe { io_kick(ctx, client_id, 0) }, NB_INVALID_ARGUMENT);
+    assert_eq!(unsafe { io_kick(ctx, client_id, 0x4) }, NB_INVALID_ARGUMENT);
+
+    // The connection is now bound to shared-direct mode; the legacy ABI must be rejected.
+    let msg = b"x";
+    let mut written: u32 = 0;
+    assert_eq!(
+        unsafe { (api.connection_write.unwrap())(ctx, client_id, msg.as_ptr(), 1, &mut written,) },
+        NB_INVALID_STATE
+    );
+
+    // Re-querying the descriptor on a shared-direct connection is allowed.
+    let mut region2 = region;
+    assert_eq!(unsafe { io_region(ctx, client_id, &mut region2) }, NB_OK);
+
     assert_eq!(
         unsafe { (api.connection_close.unwrap())(ctx, client_id) },
         NB_OK

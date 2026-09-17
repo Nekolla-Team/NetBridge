@@ -91,6 +91,11 @@ pub enum BridgeError {
     /// Invalid argument.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+
+    /// Operation is not valid for the connection's current state (for example mixing the legacy ABI
+    /// with shared-direct ring access on one connection).
+    #[error("invalid state: {0}")]
+    InvalidState(&'static str),
 }
 
 impl BridgeError {
@@ -111,7 +116,8 @@ impl BridgeError {
             Self::Internal(_)
             | Self::IdOverflow
             | Self::RuntimeUnavailable
-            | Self::InvalidArgument(_) => 7,
+            | Self::InvalidArgument(_)
+            | Self::InvalidState(_) => 7,
         }
     }
 }

@@ -8,15 +8,19 @@ use std::time::Duration;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::FutureExt;
+use net_bridge_shared_io::SharedRing;
 use tokio::runtime::{Builder, Runtime};
 
 use crate::error::BridgeError;
 use crate::event::{EventSink, NoopEventSink};
+use crate::shared_io::{
+    DEFAULT_SHARED_IO_RX_CAPACITY, DEFAULT_SHARED_IO_TX_CAPACITY, SharedConnectionIo,
+    SharedIoDriver,
+};
 use crate::transport::TransportKind;
 use crate::transport::kcp::config::KcpProfile;
 use crate::{
-    Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_FAILED, ServerHandle,
-    TransportEndpoint,
+    ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_FAILED, ServerHandle, TransportEndpoint,
 };
 
 /// Production KCP listener startup window.
@@ -25,6 +29,24 @@ pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CONTEXT_STATE_RUNNING: u8 = 0;
 pub const CONTEXT_STATE_SHUTTING_DOWN: u8 = 1;
 pub const CONTEXT_STATE_CLOSED: u8 = 2;
+
+/// Plain-value shared IO ring descriptor for one connection, safe to marshal across the C ABI.
+pub struct ConnectionIoRegion {
+    /// Base address of the Java -> transport ring region (header + data).
+    pub tx_base: usize,
+    /// Total mapped size of the TX region in bytes (`header + capacity`).
+    pub tx_total_bytes: usize,
+    /// Usable TX capacity in bytes.
+    pub tx_capacity: usize,
+    /// Base address of the transport -> Java ring region (header + data).
+    pub rx_base: usize,
+    /// Total mapped size of the RX region in bytes (`header + capacity`).
+    pub rx_total_bytes: usize,
+    /// Usable RX capacity in bytes.
+    pub rx_capacity: usize,
+    /// Ring layout version (`major << 32 | minor`).
+    pub layout_version: u64,
+}
 
 pub struct NativeContext {
     state: AtomicU8,
@@ -36,14 +58,62 @@ pub struct NativeContext {
     conn_tasks: DashMap<u64, tokio::task::JoinHandle<()>>,
     next_id: AtomicU64,
     event_sink: Arc<dyn EventSink>,
+    shared_io_tx_capacity: usize,
+    shared_io_rx_capacity: usize,
 }
 
 impl NativeContext {
-    /// Creates a new NativeContext instance.
+    /// Creates a new NativeContext instance with the default shared-ring capacities.
     pub fn new(
         worker_threads: usize,
         event_sink: Option<Arc<dyn EventSink>>,
     ) -> Result<Arc<Self>, BridgeError> {
+        Self::new_with_shared_io_capacities(
+            worker_threads,
+            event_sink,
+            DEFAULT_SHARED_IO_TX_CAPACITY,
+            DEFAULT_SHARED_IO_RX_CAPACITY,
+        )
+    }
+
+    /// Creates a new NativeContext with explicit per-connection shared-ring capacities.
+    ///
+    /// Zero capacities select the defaults. Capacities must be powers of two at or above the
+    /// shared-io minimum; an invalid value fails context creation.
+    pub fn new_with_shared_io_capacities(
+        worker_threads: usize,
+        event_sink: Option<Arc<dyn EventSink>>,
+        shared_io_tx_capacity: usize,
+        shared_io_rx_capacity: usize,
+    ) -> Result<Arc<Self>, BridgeError> {
+        let tx_capacity = if shared_io_tx_capacity == 0 {
+            DEFAULT_SHARED_IO_TX_CAPACITY
+        } else {
+            shared_io_tx_capacity
+        };
+        let rx_capacity = if shared_io_rx_capacity == 0 {
+            DEFAULT_SHARED_IO_RX_CAPACITY
+        } else {
+            shared_io_rx_capacity
+        };
+        // Validate the ring capacities eagerly so misconfiguration fails at creation time.
+        SharedRing::allocate(tx_capacity)
+            .and_then(|_| SharedRing::allocate(rx_capacity))
+            .map_err(|err| {
+                BridgeError::InvalidArgument(match err {
+                    net_bridge_shared_io::SharedIoError::CapacityNotPowerOfTwo(_) => {
+                        "shared io capacity must be a power of two"
+                    }
+                    net_bridge_shared_io::SharedIoError::CapacityTooSmall { .. } => {
+                        "shared io capacity is below the minimum"
+                    }
+                    net_bridge_shared_io::SharedIoError::CapacityTooLarge(_) => {
+                        "shared io capacity is above the maximum"
+                    }
+                    _ => "invalid shared io capacity",
+                })
+            })?;
+
         let mut builder = Builder::new_multi_thread();
         builder.enable_all();
         builder.thread_name("net-bridge-native");
@@ -65,7 +135,21 @@ impl NativeContext {
             conn_tasks: DashMap::new(),
             next_id: AtomicU64::new(1),
             event_sink: event_sink.unwrap_or_else(|| Arc::new(NoopEventSink)),
+            shared_io_tx_capacity: tx_capacity,
+            shared_io_rx_capacity: rx_capacity,
         }))
+    }
+
+    /// Returns the configured per-connection shared-ring capacities `(tx, rx)`.
+    pub fn shared_io_capacities(&self) -> (usize, usize) {
+        (self.shared_io_tx_capacity, self.shared_io_rx_capacity)
+    }
+
+    /// Allocates the data plane and handle for a new connection.
+    pub(crate) fn create_connection_io(
+        &self,
+    ) -> Result<(Arc<SharedConnectionIo>, SharedIoDriver), BridgeError> {
+        SharedConnectionIo::create(self.shared_io_tx_capacity, self.shared_io_rx_capacity)
     }
 
     pub fn handle(&self) -> &tokio::runtime::Handle {
@@ -200,10 +284,8 @@ impl NativeContext {
         };
         // DashMap guard was released immediately after obtaining the Arc
         let _ = handle.emit_terminal(&*self.event_sink, conn, STATE_CLOSED, 0);
-        let to_transport = handle.to_transport.clone();
         let _ = handle.cancel_tx.send(true);
         drop(handle);
-        let _ = to_transport.try_send(Command::Close);
         self.remove_conn(conn);
         true
     }
@@ -342,126 +424,115 @@ impl NativeContext {
         let _ = start_tx.send(());
     }
 
-    pub fn write_chunk(&self, conn: u64, data: Bytes) -> Result<usize, BridgeError> {
+    /// Legacy ABI write shim: copies `data` into the connection's TX ring.
+    ///
+    /// Returns the number of bytes published. `Ok(0)` with non-empty input means the ring is full
+    /// (the caller maps this to WOULD_BLOCK).
+    pub fn write_chunk_legacy(&self, conn: u64, data: &[u8]) -> Result<usize, BridgeError> {
         if data.is_empty() {
             return Ok(0);
         }
-        let len = data.len();
-        if len > crate::MAX_IO_CHUNK {
+        if data.len() > crate::MAX_IO_CHUNK {
             return Err(BridgeError::InvalidArgument(
                 "chunk size exceeds MAX_IO_CHUNK",
             ));
         }
-        let Some(handle) = self.connections.get(&conn) else {
-            return Err(BridgeError::NoSuchConnection);
-        };
+        let handle = self
+            .connections
+            .get(&conn)
+            .map(|h| Arc::clone(&*h))
+            .ok_or(BridgeError::NoSuchConnection)?;
+        handle.claim_legacy_abi()?;
         let writable = handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
-        let write_blocked = Arc::clone(&handle.write_blocked);
-        let outbound_bytes = Arc::clone(&handle.outbound_bytes);
-        let to_transport = handle.to_transport.clone();
-        drop(handle);
         if !writable {
             return Ok(0);
         }
-
-        // Reserve byte budget atomically
-        let mut curr_bytes = outbound_bytes.load(Ordering::SeqCst);
-        loop {
-            if curr_bytes.saturating_add(len) > crate::DEFAULT_MAX_BUFFERED_BYTES {
-                write_blocked.store(true, Ordering::SeqCst);
-                // Double check to prevent lost-wakeup race
-                if outbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES
-                    && write_blocked.swap(false, Ordering::SeqCst)
-                {
-                    self.emit_non_terminal(conn, crate::event::NB_EVENT_WRITABLE, 0, 0);
-                }
-                return Ok(0);
-            }
-            match outbound_bytes.compare_exchange_weak(
-                curr_bytes,
-                curr_bytes + len,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(actual) => curr_bytes = actual,
-            }
-        }
-
-        match to_transport.try_send(Command::Write(data)) {
-            Ok(()) => Ok(len),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Rollback byte budget
-                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
-                write_blocked.store(true, Ordering::SeqCst);
-                // Double check to prevent lost-wakeup race if consumer drained just before store
-                if to_transport.capacity() > 0 && write_blocked.swap(false, Ordering::SeqCst) {
-                    self.emit_non_terminal(conn, crate::event::NB_EVENT_WRITABLE, 0, 0);
-                }
-                Ok(0)
-            }
-            Err(_) => {
-                // Rollback byte budget
-                outbound_bytes.fetch_sub(len, Ordering::SeqCst);
-                Err(BridgeError::ConnectionClosed)
-            }
-        }
+        let io = Arc::clone(&handle.shared_io);
+        drop(handle);
+        Ok(io.write_legacy(data))
     }
 
-    pub fn read_chunk(&self, conn: u64, max_bytes: usize) -> Result<Bytes, BridgeError> {
-        let Some(handle) = self.connections.get(&conn) else {
-            return Err(BridgeError::NoSuchConnection);
-        };
-        let to_java = handle.to_java.clone();
-        let inbound_bytes = Arc::clone(&handle.inbound_bytes);
-        let read_waker = Arc::clone(&handle.read_waker);
+    /// Legacy ABI read shim: copies up to `dst.len()` bytes out of the connection's RX ring.
+    ///
+    /// Returns the number of bytes consumed. `Ok(0)` with non-empty `dst` means the ring is empty
+    /// (the caller maps this to WOULD_BLOCK).
+    pub fn read_chunk_legacy(&self, conn: u64, dst: &mut [u8]) -> Result<usize, BridgeError> {
+        let handle = self
+            .connections
+            .get(&conn)
+            .map(|h| Arc::clone(&*h))
+            .ok_or(BridgeError::NoSuchConnection)?;
+        handle.claim_legacy_abi()?;
+        let io = Arc::clone(&handle.shared_io);
         drop(handle);
-        let mut guard = to_java
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (rx, pending) = &mut *guard;
+        Ok(io.read_legacy(dst))
+    }
 
-        let first = match pending.pop_front().or_else(|| rx.try_recv().ok()) {
-            Some(b) => b,
-            None => return Ok(Bytes::new()),
-        };
-        if first.len() > max_bytes {
-            pending.push_front(first.slice(max_bytes..));
-            inbound_bytes.fetch_sub(max_bytes, Ordering::SeqCst);
-            read_waker.notify_one();
-            return Ok(first.slice(..max_bytes));
-        }
+    /// Convenience wrapper over [`Self::write_chunk_legacy`] that accepts [`Bytes`].
+    pub fn write_chunk(&self, conn: u64, data: Bytes) -> Result<usize, BridgeError> {
+        self.write_chunk_legacy(conn, &data)
+    }
 
-        match pending.pop_front().or_else(|| rx.try_recv().ok()) {
-            None => {
-                inbound_bytes.fetch_sub(first.len(), Ordering::SeqCst);
-                read_waker.notify_one();
-                Ok(first)
-            }
-            Some(second) => {
-                let mut out = bytes::BytesMut::with_capacity(max_bytes);
-                out.extend_from_slice(&first);
-                let mut next = Some(second);
-                while out.len() < max_bytes {
-                    let Some(mut chunk) = next
-                        .take()
-                        .or_else(|| pending.pop_front().or_else(|| rx.try_recv().ok()))
-                    else {
-                        break;
-                    };
-                    if out.len() + chunk.len() > max_bytes {
-                        let cut = max_bytes - out.len();
-                        pending.push_front(chunk.slice(cut..));
-                        chunk = chunk.slice(..cut);
-                    }
-                    out.extend_from_slice(&chunk);
-                }
-                let total_consumed = out.len();
-                inbound_bytes.fetch_sub(total_consumed, Ordering::SeqCst);
-                read_waker.notify_one();
-                Ok(out.freeze())
-            }
+    /// Convenience wrapper over [`Self::read_chunk_legacy`] that returns a [`Bytes`] buffer.
+    pub fn read_chunk(&self, conn: u64, max_bytes: usize) -> Result<Bytes, BridgeError> {
+        if max_bytes == 0 {
+            return Ok(Bytes::new());
         }
+        let mut buf = vec![0u8; max_bytes];
+        let n = self.read_chunk_legacy(conn, &mut buf)?;
+        if n == 0 {
+            return Ok(Bytes::new());
+        }
+        buf.truncate(n);
+        Ok(Bytes::from(buf))
+    }
+
+    /// Returns the shared IO ring descriptor for a connection and claims shared-direct access.
+    ///
+    /// Repeated calls are allowed; mixing with the legacy ABI on the same connection fails with
+    /// [`BridgeError::InvalidState`].
+    pub fn connection_io_region(&self, conn: u64) -> Result<ConnectionIoRegion, BridgeError> {
+        let handle = self
+            .connections
+            .get(&conn)
+            .map(|h| Arc::clone(&*h))
+            .ok_or(BridgeError::NoSuchConnection)?;
+        handle.claim_shared_direct()?;
+        let io = &handle.shared_io;
+        Ok(ConnectionIoRegion {
+            tx_base: io.tx.base_address(),
+            tx_total_bytes: io.tx.total_bytes(),
+            tx_capacity: io.tx.capacity(),
+            rx_base: io.rx.base_address(),
+            rx_total_bytes: io.rx.total_bytes(),
+            rx_capacity: io.rx.capacity(),
+            layout_version: net_bridge_shared_io::layout_version(),
+        })
+    }
+
+    /// Edge-kicks a connection's transport driver.
+    ///
+    /// `tx_data` wakes the TX consumer waiting for Java-written data; `rx_space` wakes the RX
+    /// producer waiting for Java to release space. This never copies payload or blocks.
+    pub fn connection_io_kick(
+        &self,
+        conn: u64,
+        tx_data: bool,
+        rx_space: bool,
+    ) -> Result<(), BridgeError> {
+        let handle = self
+            .connections
+            .get(&conn)
+            .map(|h| Arc::clone(&*h))
+            .ok_or(BridgeError::NoSuchConnection)?;
+        let io = &handle.shared_io;
+        if tx_data {
+            io.tx_data_notify.notify_one();
+        }
+        if rx_space {
+            io.rx_space_notify.notify_one();
+        }
+        Ok(())
     }
 
     pub fn server_port(&self, server: u64) -> Option<u16> {
@@ -693,6 +764,30 @@ mod tests {
         (ctx, sink)
     }
 
+    /// Builds a ring-backed connection handle for tests that do not drive a transport task.
+    fn test_handle(
+        state: Arc<AtomicU32>,
+        server_id: Option<u64>,
+        server_count: Option<Arc<AtomicUsize>>,
+        early_write: bool,
+    ) -> ConnHandle {
+        let (shared_io, _driver) = SharedConnectionIo::create(
+            crate::shared_io::DEFAULT_SHARED_IO_TX_CAPACITY,
+            crate::shared_io::DEFAULT_SHARED_IO_RX_CAPACITY,
+        )
+        .expect("shared io");
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+        ConnHandle::new(
+            state,
+            cancel_tx,
+            shared_io,
+            server_id,
+            server_count,
+            early_write,
+            None,
+        )
+    }
+
     fn wait_accepted(sink: &RecordingSink, server: u64) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -862,28 +957,8 @@ mod tests {
     fn panic_in_poll_cleans_up_and_emits_terminal_once() {
         let (ctx, sink) = recording_ctx();
         let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
-        ctx.conns().insert(
-            7,
-            Arc::new(ConnHandle::new(
-                state.clone(),
-                {
-                    let (_tx, rx) = tokio::sync::mpsc::channel(1);
-                    rx
-                },
-                {
-                    let (tx, _rx) = tokio::sync::mpsc::channel(1);
-                    tx
-                },
-                {
-                    let (tx, _rx) = tokio::sync::watch::channel(false);
-                    tx
-                },
-                None,
-                None,
-                false,
-                None,
-            )),
-        );
+        ctx.conns()
+            .insert(7, Arc::new(test_handle(state.clone(), None, None, false)));
         ctx.spawn_connection_task("panic probe", 7, async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             panic!("boom in poll");
@@ -922,19 +997,18 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_limits_outbound_and_releases_properly() {
+    fn ring_backpressure_blocks_then_writable_fires_on_edge() {
         let (ctx, sink) = recording_ctx();
-        let (to_transport_tx, mut to_transport_rx) = tokio::sync::mpsc::channel::<Command>(4096);
-        let (_to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Bytes>(8192);
+        let capacity = crate::shared_io::DEFAULT_SHARED_IO_TX_CAPACITY;
+        let (shared_io, mut driver) =
+            SharedConnectionIo::create(capacity, capacity).expect("shared io");
         let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
-
         ctx.conns().insert(
             42,
             Arc::new(ConnHandle::new(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
-                to_java_rx,
-                to_transport_tx,
                 cancel_tx,
+                shared_io,
                 None,
                 None,
                 false,
@@ -942,52 +1016,38 @@ mod tests {
             )),
         );
 
-        // 64 KiB
-        let chunk = Bytes::copy_from_slice(&vec![0xAAu8; crate::MAX_IO_CHUNK]);
-        // 64 chunks = 4 MiB
-        let total_chunks = crate::DEFAULT_MAX_BUFFERED_BYTES / crate::MAX_IO_CHUNK;
-
+        // 64 KiB chunks, 128 KiB ring => exactly two fit.
+        let chunk = vec![0xAAu8; crate::MAX_IO_CHUNK];
+        let total_chunks = capacity / crate::MAX_IO_CHUNK;
         for i in 0..total_chunks {
-            let res = ctx.write_chunk(42, chunk.clone()).expect("write ok");
+            let res = ctx.write_chunk_legacy(42, &chunk).expect("write ok");
             assert_eq!(res, crate::MAX_IO_CHUNK, "chunk {i} should be accepted");
         }
 
-        // Now byte budget is exhausted (4 MiB buffered)
-        let over_res = ctx.write_chunk(42, chunk.clone()).expect("would block");
-        assert_eq!(
-            over_res, 0,
-            "exceeding byte budget must return 0 / would_block"
-        );
+        // Ring is now full: the shim returns WOULD_BLOCK and arms the producer wait state.
+        let over_res = ctx.write_chunk_legacy(42, &chunk).expect("would block");
+        assert_eq!(over_res, 0, "full ring must return 0 / would_block");
 
-        // Drain one chunk from to_transport_rx
-        let cmd = to_transport_rx.try_recv().expect("cmd");
-        if let Command::Write(b) = cmd {
-            let conn = ctx.conns().get(&42).unwrap();
-            conn.outbound_bytes.fetch_sub(b.len(), Ordering::SeqCst);
-            if conn.write_blocked.swap(false, Ordering::SeqCst) {
-                ctx.event_sink()
-                    .on_event(crate::event::NB_EVENT_WRITABLE, 42, 0, 0);
-            }
-        }
+        // The transport consumer drains one chunk; because the producer was parked this claims the
+        // WRITABLE edge.
+        let mut drain = vec![0u8; crate::MAX_IO_CHUNK];
+        let (n, wake) = driver.tx_consumer.copy_into(&mut drain);
+        assert_eq!(n, crate::MAX_IO_CHUNK);
+        assert!(wake, "draining a parked producer must claim the wakeup");
+        ctx.emit_non_terminal(42, crate::event::NB_EVENT_WRITABLE, 0, 0);
 
-        // Verify WRITABLE event is fired
-        let writable_events: Vec<_> = sink
+        let writable_events = sink
             .0
             .lock()
             .unwrap()
             .iter()
             .filter(|(k, o, _, _)| *k == crate::event::NB_EVENT_WRITABLE && *o == 42)
-            .cloned()
-            .collect();
-        assert_eq!(
-            writable_events.len(),
-            1,
-            "WRITABLE event must be emitted on edge"
-        );
+            .count();
+        assert_eq!(writable_events, 1, "WRITABLE event must be emitted on edge");
 
-        // Now we can write one more chunk
+        // Space was released, so another chunk is accepted.
         let next_res = ctx
-            .write_chunk(42, chunk.clone())
+            .write_chunk_legacy(42, &chunk)
             .expect("write ok after drain");
         assert_eq!(next_res, crate::MAX_IO_CHUNK);
 
@@ -1040,21 +1100,14 @@ mod tests {
     #[test]
     fn event_ordering_terminal_fences_non_terminal() {
         let (ctx, sink) = recording_ctx();
-        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
-        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 999;
         ctx.conns().insert(
             conn_id,
-            Arc::new(ConnHandle::new(
+            Arc::new(test_handle(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
-                to_java_rx,
-                to_transport_tx,
-                cancel_tx,
                 None,
                 None,
                 false,
-                None,
             )),
         );
 
@@ -1117,18 +1170,11 @@ mod tests {
         assert!(ctx.stop_server(server_id).is_ok());
 
         // Now an accept attempt comes in after stop linearization:
-        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
-        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
-        let handle = ConnHandle::new(
+        let handle = test_handle(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
-            to_java_rx,
-            to_transport_tx,
-            cancel_tx,
             Some(server_id),
             Some(conn_count),
             false,
-            None,
         );
 
         let accepted = ctx.try_commit_accept(server_id, 200, Arc::new(handle));
@@ -1153,23 +1199,22 @@ mod tests {
     }
 
     #[test]
-    fn saturated_command_queue_does_not_block_close() {
+    fn close_is_out_of_band_and_cancels() {
         let (ctx, _) = recording_ctx();
-        let (to_transport_tx, _to_transport_rx) = tokio::sync::mpsc::channel(1);
-        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let conn_id = 777;
-
-        // Fill the 1-capacity command channel
-        let _ = to_transport_tx.try_send(Command::Write(Bytes::from_static(b"fill")));
+        let (shared_io, _driver) = SharedConnectionIo::create(
+            crate::shared_io::DEFAULT_SHARED_IO_TX_CAPACITY,
+            crate::shared_io::DEFAULT_SHARED_IO_RX_CAPACITY,
+        )
+        .expect("shared io");
 
         ctx.conns().insert(
             conn_id,
             Arc::new(ConnHandle::new(
                 Arc::new(AtomicU32::new(STATE_CONNECTED)),
-                to_java_rx,
-                to_transport_tx,
                 cancel_tx,
+                shared_io,
                 None,
                 None,
                 false,
@@ -1177,7 +1222,7 @@ mod tests {
             )),
         );
 
-        // Closing a connection with a saturated command queue must succeed immediately out-of-band
+        // Closing must succeed immediately and signal cancellation out-of-band.
         assert!(ctx.close_connection(conn_id));
         assert!(*cancel_rx.borrow(), "Cancellation signal must be delivered");
         assert!(
@@ -1187,46 +1232,42 @@ mod tests {
     }
 
     #[test]
-    fn partial_read_accounting_is_exact() {
+    fn partial_read_consumes_exact_bytes() {
         let (ctx, _) = recording_ctx();
-        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
-        let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel(16);
+        let capacity = crate::shared_io::DEFAULT_SHARED_IO_RX_CAPACITY;
+        let (shared_io, mut driver) =
+            SharedConnectionIo::create(capacity, capacity).expect("shared io");
         let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 888;
         let handle = ConnHandle::new(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
-            to_java_rx,
-            to_transport_tx,
             cancel_tx,
+            shared_io,
             None,
             None,
             false,
             None,
         );
-        let inbound_bytes = Arc::clone(&handle.inbound_bytes);
         ctx.conns().insert(conn_id, Arc::new(handle));
 
-        // Put 100 bytes
-        inbound_bytes.store(100, Ordering::SeqCst);
-        let _ = to_java_tx.try_send(Bytes::copy_from_slice(&[42u8; 100]));
+        // The transport producer publishes 100 bytes.
+        let (written, _) = driver.rx_producer.copy_from(&[42u8; 100]);
+        assert_eq!(written, 100);
 
-        // Read 30 bytes
-        let first = ctx.read_chunk(conn_id, 30).expect("read");
-        assert_eq!(first.len(), 30);
-        assert_eq!(
-            inbound_bytes.load(Ordering::SeqCst),
-            70,
-            "Inbound budget must decrease by exactly 30"
-        );
+        // Read 30 bytes: exactly 30 are consumed and 70 remain readable.
+        let mut first = [0u8; 30];
+        let n = ctx.read_chunk_legacy(conn_id, &mut first).expect("read");
+        assert_eq!(n, 30);
+        assert_eq!(first, [42u8; 30]);
+        let used = driver.rx_producer.capacity() - driver.rx_producer.writable_len();
+        assert_eq!(used, 70);
 
-        // Read remaining 70 bytes
-        let second = ctx.read_chunk(conn_id, 100).expect("read");
-        assert_eq!(second.len(), 70);
-        assert_eq!(
-            inbound_bytes.load(Ordering::SeqCst),
-            0,
-            "Inbound budget must return to 0"
-        );
+        // Read the remaining 70 bytes.
+        let mut second = [0u8; 100];
+        let m = ctx.read_chunk_legacy(conn_id, &mut second).expect("read");
+        assert_eq!(m, 70);
+        assert_eq!(&second[..70], &[42u8; 70]);
+        assert_eq!(driver.rx_producer.writable_len(), capacity);
     }
 
     struct ReentrantConnSink {
@@ -1257,19 +1298,12 @@ mod tests {
         let ctx = NativeContext::new(2, Some(sink.clone())).expect("context");
         *sink.ctx.write().unwrap() = Some(ctx.clone());
 
-        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
-        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         let conn_id = 999;
-        let handle = ConnHandle::new(
+        let handle = test_handle(
             Arc::new(AtomicU32::new(crate::STATE_CONNECTING)),
-            to_java_rx,
-            to_transport_tx,
-            cancel_tx,
             None,
             None,
             false,
-            None,
         );
         ctx.conns().insert(conn_id, Arc::new(handle));
 
@@ -1332,18 +1366,11 @@ mod tests {
             }),
         );
 
-        let (to_transport_tx, _) = tokio::sync::mpsc::channel(16);
-        let (_, to_java_rx) = tokio::sync::mpsc::channel(16);
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
-        let handle = ConnHandle::new(
+        let handle = test_handle(
             Arc::new(AtomicU32::new(STATE_CONNECTED)),
-            to_java_rx,
-            to_transport_tx,
-            cancel_tx,
             Some(server_id),
             Some(conn_count),
             false,
-            None,
         );
 
         let accepted = ctx.try_commit_accept(server_id, 1001, Arc::new(handle));

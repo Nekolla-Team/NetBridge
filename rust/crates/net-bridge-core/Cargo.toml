@@ -17,3 +17,4 @@ fec = "0.2.2"
 kcp-rs = "0.2.6"
 smux = "0.2"
 futures-util = "0.3"
+net-bridge-shared-io = { path = "../net-bridge-shared-io" }

@@ -4,13 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use bytes::Bytes;
-use tokio::sync::mpsc;
-
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTING};
+use crate::{ConnHandle, STATE_CLOSED, STATE_CONNECTING};
 
 /// Starts a QUIC client connection through NativeContext.
 pub fn connect_in_context(
@@ -18,8 +15,7 @@ pub fn connect_in_context(
     host: &str,
     port: u16,
 ) -> Result<u64, BridgeError> {
-    let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
-    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
+    let (shared_io, driver) = ctx.create_connection_io()?;
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let conn_id = ctx.allocate_id()?;
@@ -27,9 +23,8 @@ pub fn connect_in_context(
         conn_id,
         Arc::new(ConnHandle::new(
             state.clone(),
-            to_java_rx,
-            to_transport_tx.clone(),
             cancel_tx,
+            Arc::clone(&shared_io),
             None,
             None,
             true,
@@ -49,9 +44,8 @@ pub fn connect_in_context(
                 cancel_rx,
                 send,
                 recv,
-                to_transport_rx,
-                to_java_tx,
-                to_transport_tx,
+                driver,
+                shared_io,
                 state,
                 Arc::clone(&ctx_task),
             )

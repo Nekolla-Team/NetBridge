@@ -86,7 +86,77 @@ class FfmApiLayoutTest {
         );
         assertEquals(
                 16,
+                FfmApiLayouts.CONTEXT_OPTIONS_V1.byteOffset(
+                        PathElement.groupElement("shared_io_tx_capacity")
+                )
+        );
+        assertEquals(
+                20,
+                FfmApiLayouts.CONTEXT_OPTIONS_V1.byteOffset(
+                        PathElement.groupElement("shared_io_rx_capacity")
+                )
+        );
+        assertEquals(
+                24,
                 FfmApiLayouts.CONTEXT_OPTIONS_V1.byteOffset(PathElement.groupElement("reserved"))
+        );
+    }
+
+    @Test
+    void testSharedIoRegionLayout() {
+        assertEquals(
+                96,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteSize()
+        );
+        assertEquals(
+                0,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(PathElement.groupElement("struct_size"))
+        );
+        assertEquals(
+                4,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(PathElement.groupElement("flags"))
+        );
+        assertEquals(
+                8,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(
+                        PathElement.groupElement("layout_version")
+                )
+        );
+        assertEquals(
+                16,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(PathElement.groupElement("tx_base"))
+        );
+        assertEquals(
+                24,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(
+                        PathElement.groupElement("tx_total_bytes")
+                )
+        );
+        assertEquals(
+                32,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(
+                        PathElement.groupElement("tx_capacity")
+                )
+        );
+        assertEquals(
+                40,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(PathElement.groupElement("rx_base"))
+        );
+        assertEquals(
+                48,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(
+                        PathElement.groupElement("rx_total_bytes")
+                )
+        );
+        assertEquals(
+                56,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(
+                        PathElement.groupElement("rx_capacity")
+                )
+        );
+        assertEquals(
+                64,
+                FfmApiLayouts.SHARED_IO_REGION_V1.byteOffset(PathElement.groupElement("reserved"))
         );
     }
 
@@ -233,12 +303,13 @@ class FfmApiLayoutTest {
                 FfmApiLayouts.API_V1.byteOffset(PathElement.groupElement("feature_bits"))
         );
         assertEquals(
-                0b11111L,
+                0b111111L,
                 FfmApiV1.FEATURE_QUIC
                         | FfmApiV1.FEATURE_KCP
                         | FfmApiV1.FEATURE_WRITABLE_EVENT
                         | FfmApiV1.FEATURE_BINARY_SOCKET_ADDRESS
                         | FfmApiV1.FEATURE_SERVER_STATE_EVENT
+                        | FfmApiV1.FEATURE_SHARED_RING_IO
         );
 
         assertEquals(
@@ -294,6 +365,18 @@ class FfmApiLayoutTest {
 
         assertEquals(
                 120,
+                FfmApiLayouts.API_V1.byteOffset(
+                        PathElement.groupElement("connection_io_region")
+                )
+        );
+        assertEquals(
+                128,
+                FfmApiLayouts.API_V1.byteOffset(
+                        PathElement.groupElement("connection_io_kick")
+                )
+        );
+        assertEquals(
+                136,
                 FfmApiLayouts.API_V1.byteOffset(PathElement.groupElement("reserved"))
         );
     }

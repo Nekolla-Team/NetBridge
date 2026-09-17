@@ -1,20 +1,20 @@
-//! KCP single-connection data plane: an smux session carries the MC byte stream, with read/write loops and
-//! close propagation.
+//! KCP single-connection data plane: an smux session carries the MC byte stream, driven by shared
+//! rings instead of byte queues.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use bytes::{Bytes, BytesMut};
 use kcp::KcpStream;
+use net_bridge_shared_io::{RingConsumer, RingProducer};
 use smux::{Config, ConfigBuilder, Session};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::fec_stream::FecStream;
 use crate::context::NativeContext;
 use crate::event::{NB_EVENT_DATA_AVAILABLE, NB_EVENT_WRITABLE};
 use crate::report_error;
-use crate::{Command, STATE_CLOSED, STATE_FAILED};
+use crate::shared_io::{SharedConnectionIo, SharedIoDriver};
+use crate::{MAX_IO_CHUNK, STATE_CLOSED, STATE_FAILED};
 
 type KcpFec = FecStream<KcpStream>;
 
@@ -33,101 +33,39 @@ pub async fn run_kcp_connection_with_sink(
     stream: smux::Stream,
     session: Arc<Session>,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
-    mut to_kcp_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Bytes>,
+    driver: SharedIoDriver,
+    io: Arc<SharedConnectionIo>,
     state: Arc<AtomicU32>,
-    _client_side: bool,
     ctx: Arc<NativeContext>,
 ) {
-    let (write_blocked, outbound_bytes, inbound_bytes, read_waker) = ctx
-        .conns()
-        .get(&conn_id)
-        .map(|h| {
-            (
-                h.write_blocked.clone(),
-                h.outbound_bytes.clone(),
-                h.inbound_bytes.clone(),
-                h.read_waker.clone(),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                Arc::new(tokio::sync::Notify::new()),
-            )
-        });
+    let SharedIoDriver {
+        tx_consumer,
+        rx_producer,
+    } = driver;
     let (mut stream_r, mut stream_w) = tokio::io::split(stream);
-    let mut payload = BytesMut::with_capacity(64 * 1024);
 
-    loop {
-        if state.load(Ordering::SeqCst) == STATE_CLOSED || *cancel_rx.borrow() {
-            break;
-        }
-        let can_read = inbound_bytes.load(Ordering::SeqCst) < crate::DEFAULT_MAX_BUFFERED_BYTES;
-        tokio::select! {
-            biased;
-            _ = cancel_rx.changed() => {
-                break;
-            }
-            res = stream_r.read_buf(&mut payload), if can_read => {
-                match res {
-                    Ok(0) => {
-                        // EOF
-                        break;
-                    }
-                    Ok(_) => {
-                        let chunk = payload.split().freeze();
-                        let chunk_len = chunk.len();
-                        inbound_bytes.fetch_add(chunk_len, Ordering::SeqCst);
-                        if to_java_tx.send(chunk).await.is_err() {
-                            inbound_bytes.fetch_sub(chunk_len, Ordering::SeqCst);
-                            break;
-                        }
-                        ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
-                    }
-                    Err(e) => {
-                        if state.load(Ordering::SeqCst) != STATE_CLOSED && !is_session_closed(&e) {
-                            report_error(format!("kcp conn {conn_id}: read error: {e}"));
-                            ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
-                        }
-                        break;
-                    }
-                }
-            }
-            _ = read_waker.notified(), if !can_read => {
-                // Java consumed inbound data; wake the reader to recheck can_read
-            }
-            cmd = to_kcp_rx.recv() => {
-                let closed = match cmd {
-                    Some(Command::Write(bytes)) if !bytes.is_empty() => {
-                        let bytes_len = bytes.len();
-                        if let Err(e) = stream_w.write_all(&bytes).await {
-                            outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                            if is_session_closed(&e) {
-                                true
-                            } else {
-                                report_error(format!("kcp conn {conn_id}: write error: {e}"));
-                                ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
-                                true
-                            }
-                        } else {
-                            outbound_bytes.fetch_sub(bytes_len, Ordering::SeqCst);
-                            if write_blocked.swap(false, Ordering::SeqCst) {
-                                ctx.emit_non_terminal(conn_id, NB_EVENT_WRITABLE, 0, 0);
-                            }
-                            false
-                        }
-                    }
-                    Some(Command::Close) | None => true,
-                    _ => false,
-                };
-                if closed {
-                    break;
-                }
-            }
-        }
+    let tx = drive_tx(
+        conn_id,
+        &mut stream_w,
+        tx_consumer,
+        &io,
+        &ctx,
+        cancel_rx.clone(),
+    );
+    let rx = drive_rx(
+        conn_id,
+        &mut stream_r,
+        rx_producer,
+        &io,
+        &ctx,
+        cancel_rx.clone(),
+    );
+
+    tokio::select! {
+        biased;
+        _ = cancel_rx.changed() => {}
+        _ = tx => {}
+        _ = rx => {}
     }
 
     if state.load(Ordering::SeqCst) != STATE_FAILED {
@@ -135,6 +73,79 @@ pub async fn run_kcp_connection_with_sink(
         ctx.emit_terminal(conn_id);
     }
     graceful_close(&mut stream_w, &session).await;
+}
+
+async fn drive_tx(
+    conn_id: u64,
+    stream_w: &mut (impl AsyncWrite + Unpin),
+    mut tx_consumer: RingConsumer,
+    io: &SharedConnectionIo,
+    ctx: &NativeContext,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let mut progressed = false;
+        while let Some(grant) = tx_consumer.try_acquire(MAX_IO_CHUNK) {
+            let len = grant.len();
+            if let Err(e) = stream_w.write_all(grant.as_ref()).await {
+                if ctx.connection_state(conn_id) != Some(STATE_CLOSED) && !is_session_closed(&e) {
+                    report_error(format!("kcp conn {conn_id}: write error: {e}"));
+                    ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
+                }
+                return;
+            }
+            let wake = grant.commit(len);
+            if wake {
+                ctx.emit_non_terminal(conn_id, NB_EVENT_WRITABLE, 0, 0);
+            }
+            progressed = true;
+        }
+        if progressed {
+            continue;
+        }
+        if tx_consumer.park_if_empty() {
+            tokio::select! {
+                _ = cancel.changed() => return,
+                _ = io.tx_data_notify.notified() => tx_consumer.resume_after_notification(),
+            }
+        }
+    }
+}
+
+async fn drive_rx(
+    conn_id: u64,
+    stream_r: &mut (impl AsyncRead + Unpin),
+    mut rx_producer: RingProducer,
+    io: &SharedConnectionIo,
+    ctx: &NativeContext,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        if let Some(mut grant) = rx_producer.try_acquire(MAX_IO_CHUNK) {
+            match stream_r.read(grant.as_mut()).await {
+                Ok(0) => return,
+                Ok(n) => {
+                    let wake = grant.commit(n);
+                    if wake {
+                        ctx.emit_non_terminal(conn_id, NB_EVENT_DATA_AVAILABLE, 0, 0);
+                    }
+                }
+                Err(e) => {
+                    if ctx.connection_state(conn_id) != Some(STATE_CLOSED) && !is_session_closed(&e)
+                    {
+                        report_error(format!("kcp conn {conn_id}: read error: {e}"));
+                        ctx.fail_connection_with_reason(conn_id, crate::event::NB_REASON_PROTOCOL);
+                    }
+                    return;
+                }
+            }
+        } else if rx_producer.park_if_full() {
+            tokio::select! {
+                _ = cancel.changed() => return,
+                _ = io.rx_space_notify.notified() => rx_producer.resume_after_notification(),
+            }
+        }
+    }
 }
 
 pub async fn prepare_kcp_data_plane(

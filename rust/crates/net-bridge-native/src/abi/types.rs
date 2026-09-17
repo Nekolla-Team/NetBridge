@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// C ABI major version.
 pub const NB_ABI_MAJOR: u32 = 1;
 /// C ABI minor version.
-pub const NB_ABI_MINOR: u32 = 0;
+pub const NB_ABI_MINOR: u32 = 1;
 
 /// Supports the QUIC transport.
 pub const NB_FEATURE_QUIC: u64 = 1 << 0;
@@ -22,6 +22,17 @@ pub const NB_FEATURE_WRITABLE_EVENT: u64 = 1 << 2;
 pub const NB_FEATURE_BINARY_SOCKET_ADDRESS: u64 = 1 << 3;
 /// Emits `NB_EVENT_SERVER_STATE` for server lifecycle transitions.
 pub const NB_FEATURE_SERVER_STATE_EVENT: u64 = 1 << 4;
+/// Exposes per-connection shared-memory IO region descriptors and edge kick control.
+pub const NB_FEATURE_SHARED_RING_IO: u64 = 1 << 5;
+
+/// `nb_shared_io_region_v1_t` flag: the region memory is owned by Rust and must not be freed by the
+/// consumer.
+pub const NB_SHARED_IO_REGION_RUST_OWNED: u32 = 1 << 0;
+
+/// `connection_io_kick` flag: wake the transport consumer waiting for TX data.
+pub const NB_IO_KICK_TX_DATA: u32 = 1 << 0;
+/// `connection_io_kick` flag: wake the transport producer waiting for RX space.
+pub const NB_IO_KICK_RX_SPACE: u32 = 1 << 1;
 
 /// QUIC transport kind selector.
 pub const NB_TRANSPORT_QUIC: u32 = 1;
@@ -126,7 +137,9 @@ pub struct NbSocketAddressV1 {
 
 /// Native context creation options.
 ///
-/// A zero value for `worker_threads` selects the runtime default.
+/// A zero value for `worker_threads` selects the runtime default. The shared-IO ring capacities are
+/// only consumed when `NB_FEATURE_SHARED_RING_IO` is advertised; a zero capacity selects the
+/// native default. Older peers treat both fields as reserved zero.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NbContextOptionsV1 {
@@ -138,8 +151,12 @@ pub struct NbContextOptionsV1 {
     pub worker_threads: u32,
     /// Reserved for ABI growth; must be zero.
     pub reserved0: u32,
+    /// Per-connection Java -> transport ring capacity in bytes; 0 selects the default.
+    pub shared_io_tx_capacity: u32,
+    /// Per-connection transport -> Java ring capacity in bytes; 0 selects the default.
+    pub shared_io_rx_capacity: u32,
     /// Reserved for ABI growth; must be zero.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 3],
 }
 
 /// Event callback invoked on native worker threads.
@@ -207,6 +224,35 @@ pub struct NbServerOptionsV1 {
     pub flags: u32,
     /// Reserved for ABI growth; must be zero.
     pub reserved1: u32,
+    /// Reserved for ABI growth; must be zero.
+    pub reserved: [u64; 4],
+}
+
+/// Per-connection shared IO ring descriptor returned by `connection_io_region`.
+///
+/// The two regions are Rust-owned; the consumer must only borrow the mapped memory until the
+/// connection is closed. `layout_version` is `major << 32 | minor` and must match the ring header.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NbSharedIoRegionV1 {
+    /// Size of the caller-provided struct in bytes.
+    pub struct_size: u32,
+    /// Bit set of `NB_SHARED_IO_REGION_*` flags.
+    pub flags: u32,
+    /// Ring layout version (`major << 32 | minor`).
+    pub layout_version: u64,
+    /// Base address of the Java -> transport ring region (header + data).
+    pub tx_base: *mut u8,
+    /// Total mapped size of the TX region in bytes (`header + capacity`).
+    pub tx_total_bytes: u64,
+    /// Usable TX capacity in bytes.
+    pub tx_capacity: u64,
+    /// Base address of the transport -> Java ring region (header + data).
+    pub rx_base: *mut u8,
+    /// Total mapped size of the RX region in bytes (`header + capacity`).
+    pub rx_total_bytes: u64,
+    /// Usable RX capacity in bytes.
+    pub rx_capacity: u64,
     /// Reserved for ABI growth; must be zero.
     pub reserved: [u64; 4],
 }
@@ -308,8 +354,27 @@ pub struct NbApiV1 {
     pub server_stop:
         Option<unsafe extern "C" fn(context: *mut NbContext, server: NbServer) -> NbStatus>,
 
+    /// Query the per-connection shared IO ring descriptor. Present when
+    /// `NB_FEATURE_SHARED_RING_IO` is set; NULL otherwise.
+    pub connection_io_region: Option<
+        unsafe extern "C" fn(
+            context: *mut NbContext,
+            connection: NbConnection,
+            out_region: *mut NbSharedIoRegionV1,
+        ) -> NbStatus,
+    >,
+    /// Edge-kick a shared-direct connection's transport driver. Present when
+    /// `NB_FEATURE_SHARED_RING_IO` is set; NULL otherwise.
+    pub connection_io_kick: Option<
+        unsafe extern "C" fn(
+            context: *mut NbContext,
+            connection: NbConnection,
+            flags: u32,
+        ) -> NbStatus,
+    >,
+
     /// Reserved for ABI growth; must be zero.
-    pub reserved: [u64; 8],
+    pub reserved: [u64; 6],
 }
 
 unsafe impl Sync for NbApiV1 {}

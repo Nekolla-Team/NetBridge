@@ -45,6 +45,7 @@ public final class FfmNativeContext implements AutoCloseable {
             MemorySegment contextPtr,
             NativeEventDispatcher dispatcher
     ) {
+        super();
         this.ownerLibrary = ownerLibrary;
         this.api = api;
         this.contextPtr = contextPtr;
@@ -252,6 +253,56 @@ public final class FfmNativeContext implements AutoCloseable {
                     if (status != FfmStatus.NB_NOT_FOUND) {
                         FfmStatus.checkStatus(status, "connection_close");
                     }
+                }
+        );
+    }
+
+    /**
+     * True when the loaded native library exposes the shared-ring IO descriptor and kick functions.
+     * When false all data-plane traffic must use {@link #connectionWrite} and
+     * {@link #connectionRead}.
+     */
+    public boolean supportsSharedRingIo() {
+        return api.supportsSharedRingIo();
+    }
+
+    public FfmSharedIoRegion connectionIoRegion(long connectionId) {
+        var handle = api.connectionIoRegion();
+        if (handle == null) {
+            throw new IllegalStateException("connection_io_region is unavailable");
+        }
+
+        return callGate.call(
+                "connection_io_region",
+                () -> {
+                    try (var arena = Arena.ofConfined()) {
+                        var outRegion = arena.allocate(FfmApiLayouts.SHARED_IO_REGION_V1);
+                        var status = (int) handle.invokeExact(
+                                contextPtr,
+                                connectionId,
+                                outRegion
+                        );
+                        FfmStatus.checkStatus(status, "connection_io_region");
+                        return FfmSharedIoRegion.decode(outRegion);
+                    }
+                }
+        );
+    }
+
+    public void connectionIoKick(long connectionId, int flags) {
+        var handle = api.connectionIoKick();
+        if (handle == null) {
+            throw new IllegalStateException("connection_io_kick is unavailable");
+        }
+        callGate.execute(
+                "connection_io_kick",
+                () -> {
+                    var status = (int) handle.invokeExact(
+                            contextPtr,
+                            connectionId,
+                            flags
+                    );
+                    FfmStatus.checkStatus(status, "connection_io_kick");
                 }
         );
     }

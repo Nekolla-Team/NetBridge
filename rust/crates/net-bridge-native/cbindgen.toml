@@ -45,4 +45,5 @@ exclude = ["API_V1"]
 "NbCallbacksV1" = "nb_callbacks_v1_t"
 "NbConnectOptionsV1" = "nb_connect_options_v1_t"
 "NbServerOptionsV1" = "nb_server_options_v1_t"
+"NbSharedIoRegionV1" = "nb_shared_io_region_v1_t"
 "NbApiV1" = "nb_api_v1_t"

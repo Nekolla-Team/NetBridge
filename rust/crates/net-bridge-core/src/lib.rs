@@ -4,6 +4,7 @@
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod shared_io;
 pub mod socket_util;
 pub mod transport;
 
@@ -13,23 +14,15 @@ mod tests;
 pub use context::NativeContext;
 pub use error::BridgeError;
 pub use event::{EventSink, NoopEventSink};
+pub use shared_io::{SharedConnectionIo, SharedIoDriver};
 pub use transport::TransportKind;
 
 use std::any::Any;
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use tokio::sync::mpsc;
-
-/// Generic control command sent to a transport write task.
-#[derive(Debug)]
-pub enum Command {
-    Write(Bytes),
-    Close,
-}
 
 /// Internal connection-state constants; core values are mapped to ABI values 1..4 through
 /// `abi_connection_state` when exposed.
@@ -43,38 +36,33 @@ pub const SERVER_STATE_RUNNING: u8 = 1;
 pub const SERVER_STATE_STOPPED: u8 = 2;
 pub const SERVER_STATE_FAILED: u8 = 3;
 
-/// Default per-connection outbound/inbound byte-budget limit (4 MiB)
-pub const DEFAULT_MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum size of a single I/O chunk (64 KiB)
 pub const MAX_IO_CHUNK: usize = 64 * 1024;
+
+/// The connection's data-plane access mode has not been claimed yet.
+pub const ACCESS_MODE_UNCLAIMED: u8 = 0;
+/// The connection's data plane is driven through the legacy `connection_write`/`connection_read` ABI.
+pub const ACCESS_MODE_LEGACY_ABI: u8 = 1;
+/// The connection's data plane is mapped directly by Java and must not use the legacy ABI.
+pub const ACCESS_MODE_SHARED_DIRECT: u8 = 2;
 
 /// Handle for a single connection.
 pub struct ConnHandle {
     pub state: Arc<AtomicU32>,
-    /// Java read-side chunk queue plus an unconsumed remainder. Bytes shared views are sliced zero-copy;
-    /// stored behind Arc so the read path can clone it and release the DashMap guard immediately.
-    pub to_java: Arc<Mutex<(mpsc::Receiver<Bytes>, VecDeque<Bytes>)>>,
-    pub to_transport: mpsc::Sender<Command>,
     pub cancel_tx: tokio::sync::watch::Sender<bool>,
-    /// Notification that inbound capacity was released, waking the read data plane.
-    pub read_waker: Arc<tokio::sync::Notify>,
+    /// Bidirectional shared-memory data plane for this connection.
+    pub shared_io: Arc<SharedConnectionIo>,
+    /// One of [`ACCESS_MODE_UNCLAIMED`], [`ACCESS_MODE_LEGACY_ABI`], or [`ACCESS_MODE_SHARED_DIRECT`].
+    /// Prevents the legacy ABI and direct ring access from being mixed on one connection.
+    pub io_access_mode: AtomicU8,
     pub server_id: Option<u64>,
     /// Per-instance active count for server connections (None for client connections); decremented on
     /// removal.
     pub server_count: Option<Arc<AtomicUsize>>,
     /// Writes are allowed during connection establishment: a KCP client may write before its handshake
-    /// completes (the command enters the channel first, then is sent immediately after the handshake;
-    /// kcp-rs has a built-in handshake and does not depend on first-frame detection). False for QUIC
-    /// clients.
+    /// completes (the bytes enter the TX ring and are sent immediately after the handshake; kcp-rs has
+    /// a built-in handshake and does not depend on first-frame detection). False for QUIC clients.
     pub early_write: bool,
-    /// Write queue full / byte budget exhausted: clear the blocked state after the transport task frees
-    /// capacity and edge-trigger WRITABLE.
-    pub write_blocked: Arc<AtomicBool>,
-    /// In-flight outbound byte count, increased by FFI write and decreased when the transport task
-    /// consumes data.
-    pub outbound_bytes: Arc<AtomicUsize>,
-    /// In-flight inbound byte count, increased by the transport reader and decreased by Java reads.
-    pub inbound_bytes: Arc<AtomicUsize>,
     /// Gate that ensures terminal events (FAILED/CLOSED) are emitted only once.
     pub terminal_sent: AtomicBool,
     /// Actual peer address for the connection, used by Java-side IP controls such as bans and rate
@@ -85,14 +73,12 @@ pub struct ConnHandle {
 }
 
 impl ConnHandle {
-    /// Constructs the handle by wrapping the read-side channel and empty remainder queue in a shared
-    /// lock.
+    /// Constructs the handle around an already allocated shared data plane.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<AtomicU32>,
-        to_java_rx: mpsc::Receiver<Bytes>,
-        to_transport: mpsc::Sender<Command>,
         cancel_tx: tokio::sync::watch::Sender<bool>,
+        shared_io: Arc<SharedConnectionIo>,
         server_id: Option<u64>,
         server_count: Option<Arc<AtomicUsize>>,
         early_write: bool,
@@ -100,19 +86,51 @@ impl ConnHandle {
     ) -> Self {
         Self {
             state,
-            to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
-            to_transport,
             cancel_tx,
-            read_waker: Arc::new(tokio::sync::Notify::new()),
+            shared_io,
+            io_access_mode: AtomicU8::new(ACCESS_MODE_UNCLAIMED),
             server_id,
             server_count,
             early_write,
-            write_blocked: Arc::new(AtomicBool::new(false)),
-            outbound_bytes: Arc::new(AtomicUsize::new(0)),
-            inbound_bytes: Arc::new(AtomicUsize::new(0)),
             terminal_sent: AtomicBool::new(false),
             remote_addr: std::sync::RwLock::new(remote_addr),
             event_lock: Mutex::new(()),
+        }
+    }
+
+    /// Claims the legacy ABI data plane for this connection.
+    ///
+    /// Idempotent for repeated legacy use; fails with an invalid-state error if Java already mapped
+    /// the rings directly.
+    pub fn claim_legacy_abi(&self) -> Result<(), BridgeError> {
+        match self.io_access_mode.compare_exchange(
+            ACCESS_MODE_UNCLAIMED,
+            ACCESS_MODE_LEGACY_ABI,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) | Err(ACCESS_MODE_LEGACY_ABI) => Ok(()),
+            Err(_) => Err(BridgeError::InvalidState(
+                "connection data plane is bound to shared-direct IO",
+            )),
+        }
+    }
+
+    /// Claims the shared-direct data plane for this connection.
+    ///
+    /// Idempotent for repeated descriptor queries; fails with an invalid-state error if the legacy
+    /// ABI was already used on this connection.
+    pub fn claim_shared_direct(&self) -> Result<(), BridgeError> {
+        match self.io_access_mode.compare_exchange(
+            ACCESS_MODE_UNCLAIMED,
+            ACCESS_MODE_SHARED_DIRECT,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) | Err(ACCESS_MODE_SHARED_DIRECT) => Ok(()),
+            Err(_) => Err(BridgeError::InvalidState(
+                "connection data plane is bound to the legacy ABI",
+            )),
         }
     }
 

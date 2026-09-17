@@ -148,15 +148,17 @@ async fn accept_loop_in_context(
             conn_count.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
-        let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
-        let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let Ok((shared_io, driver)) = ctx.create_connection_io() else {
+            conn_count.fetch_sub(1, Ordering::Relaxed);
+            let _ = session.close().await;
+            continue;
+        };
 
         let handle = crate::ConnHandle::new(
             state.clone(),
-            to_java_rx,
-            to_transport_tx,
             cancel_tx,
+            Arc::clone(&shared_io),
             Some(server_id),
             Some(Arc::clone(&conn_count)),
             false,
@@ -179,10 +181,9 @@ async fn accept_loop_in_context(
                 mc_stream,
                 session,
                 cancel_rx,
-                to_transport_rx,
-                to_java_tx,
+                driver,
+                shared_io,
                 state,
-                false,
                 Arc::clone(&ctx),
             ),
         );

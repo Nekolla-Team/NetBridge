@@ -440,6 +440,68 @@ class FfmLifecycleHardeningTest {
 
             var api = FfmApiV1.fromAddress(fakeTable, arena);
             assertEquals(0L, api.featureBits());
+            // Old-style table: no shared-ring IO feature and no reserved-slot function pointers, so
+            // callers must fall back to the legacy connection_write/read ABI.
+            assertFalse(api.supportsSharedRingIo());
+            assertNull(api.connectionIoRegion());
+            assertNull(api.connectionIoKick());
+        }
+    }
+
+    @Test
+    void sharedRingFeatureWithoutFunctionPointersDoesNotEnableDirectMode() {
+        try (var arena = Arena.ofConfined()) {
+            var fakeTable = arena.allocate(
+                    FfmApiLayouts.API_V1.byteSize(),
+                    8
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    0,
+                    1
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    4,
+                    1
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    8,
+                    (int) FfmApiLayouts.API_V1.byteSize()
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_LONG,
+                    16,
+                    FfmApiV1.FEATURE_QUIC
+                            | FfmApiV1.FEATURE_SHARED_RING_IO
+            );
+
+            var linker = Linker.nativeLinker();
+            var dummyFunc = linker.defaultLookup().find("malloc").orElseThrow();
+            var names = new String[]{
+                    "context_create", "context_shutdown", "context_destroy",
+                    "connect", "connection_state", "connection_remote_address",
+                    "connection_write", "connection_read", "connection_close",
+                    "server_start", "server_port", "server_stop"
+            };
+            Arrays.stream(names)
+                    .mapToLong(name -> FfmApiLayouts.API_V1.byteOffset(
+                            MemoryLayout.PathElement.groupElement(name)
+                    ))
+                    .forEach(offset -> fakeTable.set(
+                            ValueLayout.ADDRESS,
+                            offset,
+                            dummyFunc
+                    ));
+
+            var api = FfmApiV1.fromAddress(fakeTable, arena);
+            assertEquals(
+                    FfmApiV1.FEATURE_QUIC | FfmApiV1.FEATURE_SHARED_RING_IO,
+                    api.featureBits()
+            );
+            // Feature bit alone is not sufficient: the reserved-slot pointers are null.
+            assertFalse(api.supportsSharedRingIo());
         }
     }
 

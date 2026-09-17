@@ -2,6 +2,7 @@ package top.tangge233.netbridge.nativebridge.internal.ffm;
 
 import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
+import org.jspecify.annotations.Nullable;
 
 public record FfmApiV1(
         MethodHandle contextCreate,
@@ -16,6 +17,8 @@ public record FfmApiV1(
         MethodHandle serverStart,
         MethodHandle serverPort,
         MethodHandle serverStop,
+        @Nullable MethodHandle connectionIoRegion,
+        @Nullable MethodHandle connectionIoKick,
         int abiMajor,
         int abiMinor,
         int structSize,
@@ -27,6 +30,7 @@ public record FfmApiV1(
     public static final long FEATURE_WRITABLE_EVENT = 1L << 2;
     public static final long FEATURE_BINARY_SOCKET_ADDRESS = 1L << 3;
     public static final long FEATURE_SERVER_STATE_EVENT = 1L << 4;
+    public static final long FEATURE_SHARED_RING_IO = 1L << 5;
 
     private FfmApiV1(
             int abiMajor,
@@ -44,7 +48,9 @@ public record FfmApiV1(
             MethodHandle connectionClose,
             MethodHandle serverStart,
             MethodHandle serverPort,
-            MethodHandle serverStop
+            MethodHandle serverStop,
+            @Nullable MethodHandle connectionIoRegion,
+            @Nullable MethodHandle connectionIoKick
     ) {
         this(
                 contextCreate,
@@ -59,6 +65,8 @@ public record FfmApiV1(
                 serverStart,
                 serverPort,
                 serverStop,
+                connectionIoRegion,
+                connectionIoKick,
                 abiMajor,
                 abiMinor,
                 structSize,
@@ -199,6 +207,30 @@ public record FfmApiV1(
                 "server_stop"
         );
 
+        var connectionIoRegionPtr = getOptionalFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_io_region"
+        );
+        var connectionIoKickPtr = getOptionalFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_io_kick"
+        );
+
+        var connectionIoRegionHandle = connectionIoRegionPtr == null
+                ? null
+                : linker.downcallHandle(
+                        connectionIoRegionPtr,
+                        FfmApiLayouts.CONNECTION_IO_REGION_DESC
+                );
+        var connectionIoKickHandle = connectionIoKickPtr == null
+                ? null
+                : linker.downcallHandle(
+                        connectionIoKickPtr,
+                        FfmApiLayouts.CONNECTION_IO_KICK_DESC
+                );
+
         return new FfmApiV1(
                 major,
                 minor,
@@ -251,7 +283,9 @@ public record FfmApiV1(
                 linker.downcallHandle(
                         serverStopPtr,
                         FfmApiLayouts.SERVER_STOP_DESC
-                )
+                ),
+                connectionIoRegionHandle,
+                connectionIoKickHandle
         );
     }
 
@@ -260,17 +294,42 @@ public record FfmApiV1(
             int structSize,
             String name
     ) {
-        var offset = FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement(name));
-        if (offset + ValueLayout.ADDRESS.byteSize() > structSize) {
-            throw new IllegalStateException(
-                    "Field %s offset exceeds reported struct_size: %d".formatted(name, structSize)
-            );
-        }
-        var addr = segment.get(ValueLayout.ADDRESS, offset);
-        if (addr.equals(MemorySegment.NULL)) {
+        var addr = getOptionalFnPtr(segment, structSize, name);
+        if (addr == null) {
             throw new IllegalStateException("Function pointer in API table is null: " + name);
         }
         return addr;
+    }
+
+    private static @Nullable MemorySegment getOptionalFnPtr(
+            MemorySegment segment,
+            int structSize,
+            String name
+    ) {
+        var offset = FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement(name));
+        if (offset + ValueLayout.ADDRESS.byteSize() > structSize) {
+            return null;
+        }
+
+        var addr = segment.get(ValueLayout.ADDRESS, offset);
+        if (addr.equals(MemorySegment.NULL)) {
+            return null;
+        }
+
+        return addr;
+    }
+
+    /**
+     * True when the native table exposes the shared-ring IO descriptor and kick functions and
+     * advertises the matching feature bit. When false the caller must fall back to the legacy
+     * {@code connection_write}/{@code connection_read} ABI.
+     */
+    public boolean supportsSharedRingIo() {
+        return abiMajor == 1
+                && abiMinor >= 1
+                && (featureBits & FEATURE_SHARED_RING_IO) != 0
+                && connectionIoRegion != null
+                && connectionIoKick != null;
     }
 
 }

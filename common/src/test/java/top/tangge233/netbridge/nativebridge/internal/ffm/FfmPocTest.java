@@ -63,8 +63,9 @@ class FfmPocTest {
             );
             var api = FfmApiV1.fromSegment(tableSegment);
             assertEquals(1, api.abiMajor());
-            assertEquals(0, api.abiMinor());
+            assertEquals(1, api.abiMinor());
             assertEquals(184, api.structSize());
+            assertTrue(api.supportsSharedRingIo());
 
             assertNotNull(api.contextCreate());
             assertNotNull(api.connect());

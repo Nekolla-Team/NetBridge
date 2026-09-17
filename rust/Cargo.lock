@@ -697,6 +697,7 @@ dependencies = [
  "fec",
  "futures-util",
  "kcp-rs",
+ "net-bridge-shared-io",
  "quinn",
  "quinn-plaintext",
  "quinn-proto",
@@ -712,6 +713,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "net-bridge-core",
+ "net-bridge-shared-io",
 ]
 
 [[package]]
