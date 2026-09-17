@@ -1,0 +1,20 @@
+[package]
+name = "net-bridge-shared-io"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+description = "Rust-owned shared-memory SPSC byte-ring primitive for the NetBridge data plane."
+publish = false
+
+[features]
+default = []
+# Enables the loom model checkers. Run with:
+#   RUSTFLAGS="--cfg loom" cargo test -p net-bridge-shared-io --features loom
+loom = ["dep:loom"]
+
+[dependencies]
+thiserror = "2"
+loom = { version = "0.7", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

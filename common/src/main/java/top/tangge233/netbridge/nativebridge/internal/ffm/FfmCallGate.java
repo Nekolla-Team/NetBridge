@@ -10,47 +10,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link FfmNativeContext}.
  *
  * <p>It rejects new downcalls once the owning context starts closing, accounts for in-flight
- * downcalls so {@link #close(int, Teardown)} can drain them, waits against the drain deadline,
- * and synchronizes the {@link State} transitions. It does not know how socket addresses are
- * encoded and has no notion of transports; the owning context supplies the native teardown
- * steps through {@link Teardown}.
+ * downcalls so {@link #close(int, Teardown)} can drain them, waits against the drain deadline, and
+ * synchronizes the {@link State} transitions. It does not know how socket addresses are encoded and
+ * has no notion of transports; the owning context supplies the native teardown steps through
+ * {@link Teardown}.
  */
 public final class FfmCallGate {
 
-    public enum State {
-
-        OPEN,
-        CLOSING,
-        CLOSED,
-        CLOSE_FAILED
-
-    }
-
-    /**
-     * A native downcall body that may return a value. Callers map ABI results to semantic
-     * types themselves; the gate only brackets the call with lifecycle accounting.
-     */
-    @FunctionalInterface
-    public interface FfmOperation<T> {
-
-        T run() throws Throwable;
-
-    }
-
-    /**
-     * The native teardown executed once all in-flight downcalls have drained. Receives the
-     * remaining drain budget in milliseconds so the native shutdown can be bounded by the
-     * original close deadline.
-     */
-    @FunctionalInterface
-    public interface Teardown {
-
-        void run(int remainingTimeoutMillis) throws Throwable;
-
-    }
-
     private static final int DRAIN_POLL_MILLIS = 20;
-
     private final AtomicLong activeOps = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private volatile State state = State.OPEN;
@@ -60,9 +27,9 @@ public final class FfmCallGate {
     }
 
     /**
-     * Runs {@code operation} as an active downcall: rejected while the context is not fully
-     * open, accounted so {@code close} can wait for it, and failure-wrapped with the operation
-     * name for diagnosability.
+     * Runs {@code operation} as an active downcall: rejected while the context is not fully open,
+     * accounted so {@code close} can wait for it, and failure-wrapped with the operation name for
+     * diagnosability.
      */
     public <T> T call(String operationName, FfmOperation<T> operation) {
         beginOp();
@@ -72,6 +39,35 @@ public final class FfmCallGate {
             throw rethrow(t, operationName);
         } finally {
             endOp();
+        }
+    }
+
+    private void beginOp() {
+        if (state != State.OPEN) {
+            throw new NativeException("NativeContext is " + state);
+        }
+        activeOps.incrementAndGet();
+        if (state != State.OPEN) {
+            activeOps.decrementAndGet();
+            throw new NativeException("NativeContext is " + state);
+        }
+    }
+
+    private static RuntimeException rethrow(Throwable t, String operationName) {
+        return t instanceof RuntimeException re
+                ? re
+                : new RuntimeException(operationName + " invocation failed", t);
+    }
+
+    private void endOp() {
+        // Fast path: the common case is a healthy, open context where no closer is waiting. Only
+        // wake the drain waiter when the gate is actually closing and this was the last in-flight
+        // operation, so steady-state downcalls never touch the lifecycle monitor.
+        var remaining = activeOps.decrementAndGet();
+        if (remaining == 0 && state != State.OPEN) {
+            synchronized (lifecycleLock) {
+                lifecycleLock.notifyAll();
+            }
         }
     }
 
@@ -112,31 +108,6 @@ public final class FfmCallGate {
         }
     }
 
-    @FunctionalInterface
-    public interface FfmAction {
-
-        void run() throws Throwable;
-
-    }
-
-    private void beginOp() {
-        if (state != State.OPEN) {
-            throw new NativeException("NativeContext is " + state);
-        }
-        activeOps.incrementAndGet();
-        if (state != State.OPEN) {
-            activeOps.decrementAndGet();
-            throw new NativeException("NativeContext is " + state);
-        }
-    }
-
-    private void endOp() {
-        activeOps.decrementAndGet();
-        synchronized (lifecycleLock) {
-            lifecycleLock.notifyAll();
-        }
-    }
-
     private void awaitDrain(long deadlineNanos) {
         while (activeOps.get() > 0) {
             if (System.nanoTime() > deadlineNanos) {
@@ -165,10 +136,43 @@ public final class FfmCallGate {
         );
     }
 
-    private static RuntimeException rethrow(Throwable t, String operationName) {
-        return t instanceof RuntimeException re
-                ? re
-                : new RuntimeException(operationName + " invocation failed", t);
+    public enum State {
+
+        OPEN,
+        CLOSING,
+        CLOSED,
+        CLOSE_FAILED
+
+    }
+
+    /**
+     * A native downcall body that may return a value. Callers map ABI results to semantic types
+     * themselves; the gate only brackets the call with lifecycle accounting.
+     */
+    @FunctionalInterface
+    public interface FfmOperation<T> {
+
+        T run() throws Throwable;
+
+    }
+
+    /**
+     * The native teardown executed once all in-flight downcalls have drained. Receives the
+     * remaining drain budget in milliseconds so the native shutdown can be bounded by the original
+     * close deadline.
+     */
+    @FunctionalInterface
+    public interface Teardown {
+
+        void run(int remainingTimeoutMillis) throws Throwable;
+
+    }
+
+    @FunctionalInterface
+    public interface FfmAction {
+
+        void run() throws Throwable;
+
     }
 
 }

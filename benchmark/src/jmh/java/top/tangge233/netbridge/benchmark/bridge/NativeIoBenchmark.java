@@ -17,8 +17,13 @@ import java.nio.ByteBuffer;
 public class NativeIoBenchmark {
 
     @Benchmark
-    public void writeDirectSuccess(WriteState s, Blackhole bh) {
+    public void writeDirectSuccess(
+            WriteState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(writeSuccess(s.direct, s.fixture, "writeDirectSuccess"));
+        counters.successOps++;
     }
 
     private static int writeSuccess(
@@ -35,13 +40,23 @@ public class NativeIoBenchmark {
     }
 
     @Benchmark
-    public void writeHeapSuccess(WriteState s, Blackhole bh) {
+    public void writeHeapSuccess(
+            WriteState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(writeSuccess(s.heap, s.fixture, "writeHeapSuccess"));
+        counters.successOps++;
     }
 
     @Benchmark
-    public void writeDirectWouldBlock(BlockWriteState s, Blackhole bh) {
+    public void writeDirectWouldBlock(
+            BlockWriteState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(writeWouldBlock(s.direct, s.fixture, "writeDirectWouldBlock"));
+        counters.wouldBlockOps++;
     }
 
     private static int writeWouldBlock(
@@ -58,13 +73,23 @@ public class NativeIoBenchmark {
     }
 
     @Benchmark
-    public void writeHeapWouldBlock(BlockWriteState s, Blackhole bh) {
+    public void writeHeapWouldBlock(
+            BlockWriteState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(writeWouldBlock(s.heap, s.fixture, "writeHeapWouldBlock"));
+        counters.wouldBlockOps++;
     }
 
     @Benchmark
-    public void readDirectSuccess(ReadState s, Blackhole bh) {
+    public void readDirectSuccess(
+            ReadState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(readSuccess(s.direct, s.fixture, "readDirectSuccess"));
+        counters.successOps++;
     }
 
     private static int readSuccess(
@@ -81,13 +106,23 @@ public class NativeIoBenchmark {
     }
 
     @Benchmark
-    public void readHeapSuccess(ReadState s, Blackhole bh) {
+    public void readHeapSuccess(
+            ReadState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(readSuccess(s.heap, s.fixture, "readHeapSuccess"));
+        counters.successOps++;
     }
 
     @Benchmark
-    public void readDirectWouldBlock(BlockReadState s, Blackhole bh) {
+    public void readDirectWouldBlock(
+            BlockReadState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(readWouldBlock(s.direct, s.fixture, "readDirectWouldBlock"));
+        counters.wouldBlockOps++;
     }
 
     private static int readWouldBlock(
@@ -104,8 +139,13 @@ public class NativeIoBenchmark {
     }
 
     @Benchmark
-    public void readHeapWouldBlock(BlockReadState s, Blackhole bh) {
+    public void readHeapWouldBlock(
+            BlockReadState s,
+            IoCounters counters,
+            Blackhole bh
+    ) {
         bh.consume(readWouldBlock(s.heap, s.fixture, "readHeapWouldBlock"));
+        counters.wouldBlockOps++;
     }
 
     /**
@@ -138,7 +178,8 @@ public class NativeIoBenchmark {
                     NativeBridgeControlBenchmark.nativeLibrary(),
                     2,
                     drainServer,
-                    feedClient
+                    feedClient,
+                    size
             );
             direct = ByteBuffer.allocateDirect(size);
             heap = ByteBuffer.allocate(size);
@@ -186,6 +227,21 @@ public class NativeIoBenchmark {
         public BlockReadState() {
             super(false, false);
         }
+
+    }
+
+    /**
+     * Explicit outcome accounting for the L1 native IO matrix. Each benchmark increments exactly
+     * one counter after its fail-fast outcome assertion, so the runner reports how many native
+     * downcalls produced progress versus how many observed backpressure instead of leaving the
+     * distinction implicit in the method name.
+     */
+    @State(Scope.Benchmark)
+    @AuxCounters(AuxCounters.Type.OPERATIONS)
+    public static class IoCounters {
+
+        public long successOps;
+        public long wouldBlockOps;
 
     }
 

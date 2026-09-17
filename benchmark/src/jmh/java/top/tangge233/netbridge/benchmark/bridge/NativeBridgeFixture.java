@@ -40,6 +40,7 @@ public final class NativeBridgeFixture implements AutoCloseable {
             NativeConnection clientConnection,
             NativeConnection serverConnection
     ) {
+        super();
         this.clientBackend = clientBackend;
         this.serverBackend = serverBackend;
         this.server = server;
@@ -52,6 +53,27 @@ public final class NativeBridgeFixture implements AutoCloseable {
             int workers,
             boolean drainServer,
             boolean feedClient
+    ) {
+        return open(
+                nativeLibrary,
+                workers,
+                drainServer,
+                feedClient,
+                4096
+        );
+    }
+
+    /**
+     * Opens a fixture whose server-side feeder writes {@code feedChunkBytes}-sized chunks. Passing
+     * the benchmark {@code size} keeps read benchmarks from being starved by an artificially small
+     * feed chunk, so a "success" read reflects the negotiated size rather than the feeder's cap.
+     */
+    public static NativeBridgeFixture open(
+            Path nativeLibrary,
+            int workers,
+            boolean drainServer,
+            boolean feedClient,
+            int feedChunkBytes
     ) {
         try {
             var clientBackend = FfmNativeTransportBackend.load(nativeLibrary, workers);
@@ -92,7 +114,7 @@ public final class NativeBridgeFixture implements AutoCloseable {
                     fixture.startDrainer();
                 }
                 if (feedClient) {
-                    fixture.startFeeder();
+                    fixture.startFeeder(Math.max(1, feedChunkBytes));
                 }
                 return fixture;
             } catch (Throwable t) {
@@ -146,10 +168,10 @@ public final class NativeBridgeFixture implements AutoCloseable {
         thread.start();
     }
 
-    private void startFeeder() {
+    private void startFeeder(int chunkBytes) {
         var thread = new Thread(
                 () -> {
-                    var chunk = ByteBuffer.allocateDirect(4096);
+                    var chunk = ByteBuffer.allocateDirect(chunkBytes);
                     while (running) {
                         chunk.clear();
                         var result = serverConnection.write(chunk);
