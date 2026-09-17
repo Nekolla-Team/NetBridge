@@ -23,26 +23,77 @@ import org.jspecify.annotations.Nullable;
  *                             indicates the packaged resource is used)
  * @param nativeCacheDirectory netbridge.native.cache.dir (native library cache directory override,
  *                             null indicates the default directory is used)
+ * @param sharedIoMode         netbridge.native.sharedIo (auto/on/off direct data-plane selection)
+ * @param sharedIoTxCapacity   netbridge.native.sharedIo.txCapacity (0 selects the native default)
+ * @param sharedIoRxCapacity   netbridge.native.sharedIo.rxCapacity (0 selects the native default)
  */
 public record NetBridgeProperties(
         @Nullable TransportMode transportOverride,
         @Nullable Integer quicPort,
         @Nullable Path nativeLibraryPath,
-        @Nullable Path nativeCacheDirectory
+        @Nullable Path nativeCacheDirectory,
+        SharedIoMode sharedIoMode,
+        int sharedIoTxCapacity,
+        int sharedIoRxCapacity
 ) {
 
     public static final String KEY_TRANSPORT = "netbridge.transport";
     public static final String KEY_QUIC_PORT = "netbridge.quicPort";
     public static final String KEY_NATIVE_PATH = "netbridge.native.path";
     public static final String KEY_NATIVE_CACHE_DIR = "netbridge.native.cache.dir";
+    public static final String KEY_SHARED_IO = "netbridge.native.sharedIo";
+    public static final String KEY_SHARED_IO_TX_CAPACITY = "netbridge.native.sharedIo.txCapacity";
+    public static final String KEY_SHARED_IO_RX_CAPACITY = "netbridge.native.sharedIo.rxCapacity";
+
+    /** Minimum accepted shared-ring capacity (matches the native ring constraint). */
+    public static final int MIN_SHARED_IO_CAPACITY = 64 * 1024;
+    /** Maximum accepted configured shared-ring capacity. */
+    public static final int MAX_SHARED_IO_CAPACITY = 1024 * 1024;
+
     private static final Logger LOGGER = LoggerFactory.getLogger(NetBridgeProperties.class);
+
+    public NetBridgeProperties {
+        if (sharedIoMode == null) {
+            throw new IllegalArgumentException("sharedIoMode must not be null");
+        }
+        validateCapacity(sharedIoTxCapacity, KEY_SHARED_IO_TX_CAPACITY);
+        validateCapacity(sharedIoRxCapacity, KEY_SHARED_IO_RX_CAPACITY);
+    }
+
+    /**
+     * Performance configuration fails fast: a misconfigured capacity is far easier to diagnose at
+     * startup than as an intermittent native context-creation failure.
+     */
+    private static void validateCapacity(int capacity, String key) {
+        if (capacity == 0) {
+            return;
+        }
+        if (Integer.bitCount(capacity) != 1) {
+            throw new IllegalArgumentException(
+                    "Invalid %s '%d': must be a power of two".formatted(key, capacity)
+            );
+        }
+        if (capacity < MIN_SHARED_IO_CAPACITY || capacity > MAX_SHARED_IO_CAPACITY) {
+            throw new IllegalArgumentException(
+                    "Invalid %s '%d': must be within [%d, %d]".formatted(
+                            key,
+                            capacity,
+                            MIN_SHARED_IO_CAPACITY,
+                            MAX_SHARED_IO_CAPACITY
+                    )
+            );
+        }
+    }
 
     public static NetBridgeProperties defaults() {
         return new NetBridgeProperties(
                 null,
                 null,
                 null,
-                null
+                null,
+                SharedIoMode.DEFAULT,
+                0,
+                0
         );
     }
 
@@ -51,7 +102,16 @@ public record NetBridgeProperties(
                 parseTransport(System.getProperty(KEY_TRANSPORT)),
                 parseQuicPort(System.getProperty(KEY_QUIC_PORT)),
                 parsePath(System.getProperty(KEY_NATIVE_PATH), KEY_NATIVE_PATH),
-                parsePath(System.getProperty(KEY_NATIVE_CACHE_DIR), KEY_NATIVE_CACHE_DIR)
+                parsePath(System.getProperty(KEY_NATIVE_CACHE_DIR), KEY_NATIVE_CACHE_DIR),
+                parseSharedIoMode(System.getProperty(KEY_SHARED_IO)),
+                parseSharedIoCapacity(
+                        System.getProperty(KEY_SHARED_IO_TX_CAPACITY),
+                        KEY_SHARED_IO_TX_CAPACITY
+                ),
+                parseSharedIoCapacity(
+                        System.getProperty(KEY_SHARED_IO_RX_CAPACITY),
+                        KEY_SHARED_IO_RX_CAPACITY
+                )
         );
     }
 
@@ -107,6 +167,37 @@ public record NetBridgeProperties(
             );
             return null;
         }
+    }
+
+    private static SharedIoMode parseSharedIoMode(@Nullable String value) {
+        if (value == null || value.isBlank()) {
+            return SharedIoMode.DEFAULT;
+        }
+
+        var parsed = SharedIoMode.parse(value);
+        if (parsed == null) {
+            throw new IllegalArgumentException(
+                    "Invalid %s '%s': expected auto/on/off".formatted(KEY_SHARED_IO, value)
+            );
+        }
+        return parsed;
+    }
+
+    private static int parseSharedIoCapacity(@Nullable String value, String key) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "Invalid %s '%s': not a number".formatted(key, value)
+            );
+        }
+        validateCapacity(parsed, key);
+        return parsed;
     }
 
 }

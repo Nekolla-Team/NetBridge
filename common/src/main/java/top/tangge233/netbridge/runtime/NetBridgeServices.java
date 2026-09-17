@@ -21,6 +21,7 @@ public final class NetBridgeServices {
     private static volatile @Nullable NetBridgeRuntime runtime;
 
     private NetBridgeServices() {
+        super();
     }
 
     public static synchronized NetBridgeRuntime bootstrap(ConfigPaths paths) {
@@ -50,7 +51,13 @@ public final class NetBridgeServices {
     private static NativeTransportBackend createNativeBackend(NetBridgeProperties properties) {
         try {
             var libraryPath = resolveLibraryPath(properties);
-            return FfmNativeTransportBackend.load(libraryPath, 4);
+            return FfmNativeTransportBackend.load(
+                    libraryPath,
+                    4,
+                    properties.sharedIoMode(),
+                    properties.sharedIoTxCapacity(),
+                    properties.sharedIoRxCapacity()
+            );
         } catch (RuntimeException e) {
             return new UnavailableNativeTransportBackend(String.valueOf(e.getMessage()));
         }

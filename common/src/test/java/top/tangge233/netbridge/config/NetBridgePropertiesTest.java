@@ -5,18 +5,23 @@ import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.transport.TransportMode;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.*;
 
 class NetBridgePropertiesTest {
 
     @AfterEach
     void tearDown() {
-        System.clearProperty(NetBridgeProperties.KEY_TRANSPORT);
-        System.clearProperty(NetBridgeProperties.KEY_QUIC_PORT);
-        System.clearProperty(NetBridgeProperties.KEY_NATIVE_PATH);
-        System.clearProperty(NetBridgeProperties.KEY_NATIVE_CACHE_DIR);
+        Arrays.asList(
+                NetBridgeProperties.KEY_TRANSPORT,
+                NetBridgeProperties.KEY_QUIC_PORT,
+                NetBridgeProperties.KEY_NATIVE_PATH,
+                NetBridgeProperties.KEY_NATIVE_CACHE_DIR,
+                NetBridgeProperties.KEY_SHARED_IO,
+                NetBridgeProperties.KEY_SHARED_IO_TX_CAPACITY,
+                NetBridgeProperties.KEY_SHARED_IO_RX_CAPACITY
+        ).forEach(System::clearProperty);
     }
 
     @Test
@@ -27,6 +32,9 @@ class NetBridgePropertiesTest {
         assertNull(props.quicPort());
         assertNull(props.nativeLibraryPath());
         assertNull(props.nativeCacheDirectory());
+        assertEquals(SharedIoMode.AUTO, props.sharedIoMode());
+        assertEquals(0, props.sharedIoTxCapacity());
+        assertEquals(0, props.sharedIoRxCapacity());
     }
 
     @Test
@@ -35,6 +43,9 @@ class NetBridgePropertiesTest {
         System.setProperty(NetBridgeProperties.KEY_QUIC_PORT, "28888");
         System.setProperty(NetBridgeProperties.KEY_NATIVE_PATH, "/opt/libnet.so");
         System.setProperty(NetBridgeProperties.KEY_NATIVE_CACHE_DIR, "/tmp/nb-cache");
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO, "on");
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_TX_CAPACITY, "131072");
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_RX_CAPACITY, "262144");
 
         var props = NetBridgeProperties.load();
 
@@ -42,6 +53,35 @@ class NetBridgePropertiesTest {
         assertEquals(28888, props.quicPort());
         assertEquals(Path.of("/opt/libnet.so"), props.nativeLibraryPath());
         assertEquals(Path.of("/tmp/nb-cache"), props.nativeCacheDirectory());
+        assertEquals(SharedIoMode.ON, props.sharedIoMode());
+        assertEquals(131072, props.sharedIoTxCapacity());
+        assertEquals(262144, props.sharedIoRxCapacity());
+    }
+
+    @Test
+    void invalidSharedIoModeFailsFast() {
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO, "sometimes");
+
+        assertThrows(IllegalArgumentException.class, NetBridgeProperties::load);
+    }
+
+    @Test
+    void invalidSharedIoCapacityFailsFast() {
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_TX_CAPACITY, "100000");
+        assertThrows(IllegalArgumentException.class, NetBridgeProperties::load);
+
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_TX_CAPACITY, "32768");
+        assertThrows(IllegalArgumentException.class, NetBridgeProperties::load);
+
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_TX_CAPACITY, "2097152");
+        assertThrows(IllegalArgumentException.class, NetBridgeProperties::load);
+    }
+
+    @Test
+    void invalidSharedIoCapacityIsNotNumeric() {
+        System.setProperty(NetBridgeProperties.KEY_SHARED_IO_RX_CAPACITY, "big");
+
+        assertThrows(IllegalArgumentException.class, NetBridgeProperties::load);
     }
 
     @Test

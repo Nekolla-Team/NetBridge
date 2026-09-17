@@ -39,8 +39,8 @@ private fun writeEnvironmentSidecar(target: File, startedAtMillis: Long) {
     fun gitOutput(vararg args: String): String? =
         try {
             val process = ProcessBuilder(listOf("git", *args))
-                    .redirectErrorStream(true)
-                    .start()
+                .redirectErrorStream(true)
+                .start()
             val text = process.inputStream.bufferedReader().readText().trim()
             if (!process.waitFor(2, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
@@ -183,9 +183,9 @@ val buildProbeNative = tasks.register<BuildNativeLibrary>("buildProbeNative") {
  */
 fun stagedNativePath(dir: Provider<out Directory>, baseName: String): String =
     dir.get().asFile
-            .resolve(NativePlatform.subdir)
-            .resolve(NativePlatform.cdylibNameFor(baseName))
-            .absolutePath
+        .resolve(NativePlatform.subdir)
+        .resolve(NativePlatform.cdylibNameFor(baseName))
+        .absolutePath
 
 val runtimeNativeLibPath: String = stagedNativePath(runtimeNativeDir, "net_bridge_native")
 val probeNativeLibPath: String = stagedNativePath(probeNativeDir, "net_bridge_benchmark_native")
@@ -385,6 +385,17 @@ registerJmhWrapper(
 )
 
 registerJmhWrapper(
+    taskName = "jmhSharedIo",
+    taskDescription =
+        "Shared-ring data plane benchmarks: Java primitive, legacy-vs-direct A/B, and the " +
+            "ring-capacity matrix (release native required).",
+    includeRegex = ".*SharedIo.*",
+    nativeDep = buildRuntimeNative.get(),
+    nativeSysProps = listOf("netbridge.native.path" to runtimeNativeLibPath),
+    quick = true
+)
+
+registerJmhWrapper(
     taskName = "jmhArena",
     taskDescription = "Pure-Java FFM allocation microbenchmarks (no native library needed).",
     includeRegex = ".*Arena.*"
@@ -401,7 +412,7 @@ registerJmhWrapper(
     taskName = "jmhAllocation",
     taskDescription =
         "L0 pure-Java FFM allocation microbenchmarks with the JMH GC profiler " +
-                "(gc.alloc.rate.norm, allocation rate, GC count/time).",
+            "(gc.alloc.rate.norm, allocation rate, GC count/time).",
     includeRegex = ".*Arena.*",
     gcProfile = true
 )
@@ -446,7 +457,7 @@ val benchmarkPortProp = providers.gradleProperty("benchmarkPort")
 val benchmarkWorkloadProp = providers.gradleProperty("benchmarkWorkload")
 val benchmarkDurationProp = providers.gradleProperty("benchmarkDuration")
 val benchmarkRttPayloadsProp = providers.gradleProperty("benchmarkRttPayloads")
-        .orElse(providers.gradleProperty("benchmarkPayload"))
+    .orElse(providers.gradleProperty("benchmarkPayload"))
 val benchmarkIterationsProp = providers.gradleProperty("benchmarkIterations")
 val benchmarkWorkersProp = providers.gradleProperty("benchmarkWorkers")
 val benchmarkRepetitionsProp = providers.gradleProperty("benchmarkRepetitions")
@@ -454,8 +465,8 @@ val benchmarkSeedProp = providers.gradleProperty("benchmarkSeed")
 
 fun booleanNeedsNativeTransport(raw: String?): Boolean =
     raw.isNullOrBlank()
-            || raw.equals("all", ignoreCase = true)
-            || raw.split(",").any { !it.equals("tcp", ignoreCase = true) }
+        || raw.equals("all", ignoreCase = true)
+        || raw.split(",").any { !it.equals("tcp", ignoreCase = true) }
 
 val nativeNeededForTransport = booleanNeedsNativeTransport(benchmarkTransportProp.orNull)
 
@@ -552,7 +563,7 @@ tasks.register<JavaExec>("channelIntegration") {
         val dir = reportDirFor("channelIntegration").get().asFile
         if (dir.exists()) dir.deleteRecursively()
         val manifest = layout.buildDirectory.file("results/current/channelIntegration.json")
-                .get().asFile
+            .get().asFile
         if (manifest.exists()) manifest.delete()
     }
     dependsOn(buildRuntimeNative)
@@ -588,7 +599,7 @@ tasks.register<JavaExec>("minecraftTraffic") {
         val dir = reportDirFor("minecraftTraffic").get().asFile
         if (dir.exists()) dir.deleteRecursively()
         val manifest = layout.buildDirectory.file("results/current/minecraftTraffic.json")
-                .get().asFile
+            .get().asFile
         if (manifest.exists()) manifest.delete()
     }
     mainClass.set("top.tangge233.netbridge.benchmark.workload.MinecraftTrafficMain")
@@ -605,7 +616,7 @@ wireManifestReporting("minecraftTraffic")
 tasks.register<JavaExec>("renderMinecraftSession") {
     description =
         "Renders a standalone HTML report for a real Minecraft session JSON file " +
-                "(produced by MinecraftBenchmarkRecorder) -Pinput=<path to .json>."
+            "(produced by MinecraftBenchmarkRecorder) -Pinput=<path to .json>."
     group = "benchmark"
     classpath = benchmarkReportRuntime
     isIgnoreExitValue = false
@@ -681,7 +692,7 @@ val aggregateBenchmarkTasks = listOf(
 tasks.register("benchmarkAll") {
     description =
         "Runs every benchmark layer (JMH L0/L1/L3A, L2 transport, L3B NativeChannel integration, " +
-                "L4A Minecraft-shaped workloads) and refreshes the top-level report catalog."
+            "L4A Minecraft-shaped workloads) and refreshes the top-level report catalog."
     group = "benchmark"
     dependsOn(aggregateBenchmarkTasks)
     dependsOn("benchmarkReport")

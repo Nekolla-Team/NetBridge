@@ -236,7 +236,7 @@ public class NativeIoBenchmark {
      * downcalls produced progress versus how many observed backpressure instead of leaving the
      * distinction implicit in the method name.
      */
-    @State(Scope.Benchmark)
+    @State(Scope.Thread)
     @AuxCounters(AuxCounters.Type.OPERATIONS)
     public static class IoCounters {
 

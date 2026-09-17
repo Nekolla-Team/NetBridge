@@ -1,5 +1,6 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
+import top.tangge233.netbridge.config.SharedIoMode;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.lang.foreign.Arena;
@@ -14,6 +15,11 @@ public final class FfmNativeConnection implements NativeConnection {
     private final long id;
     private final @Nullable FfmNativeServer ownerServer;
     private final NativeTransportKind transport;
+    private final SharedIoMode sharedIoMode;
+
+    private final Object dataPlaneLock = new Object();
+    private volatile DataPlane dataPlaneState = DataPlane.UNINITIALIZED;
+    private volatile @Nullable FfmSharedConnectionIo directPlane;
 
     private volatile NativeConnectionState state;
     private volatile NativeFailureReason failureReason = NativeFailureReason.GENERIC;
@@ -27,10 +33,12 @@ public final class FfmNativeConnection implements NativeConnection {
             NativeTransportKind transport,
             NativeConnectionState initialState
     ) {
+        super();
         this.owner = owner;
         this.id = id;
         this.ownerServer = ownerServer;
         this.transport = transport;
+        this.sharedIoMode = owner.sharedIoMode();
         this.state = initialState;
     }
 
@@ -79,58 +87,38 @@ public final class FfmNativeConnection implements NativeConnection {
     @Override
     public NativeIoResult write(ByteBuffer source) {
         ensureOpen();
-        var remaining = source.remaining();
-
-        if (remaining == 0) {
-            return NativeIoResult.progressed(0);
-        }
-        var toWrite = Math.min(remaining, 65536);
-
-        if (source.isDirect()) {
-            var directSlice = source.slice();
-            directSlice.limit(toWrite);
-            var segment = MemorySegment.ofBuffer(directSlice);
-            var result = owner.context().connectionWrite(id, segment, toWrite);
-
+        var plane = ensureDataPlane();
+        if (plane != null) {
+            var result = plane.write(source);
             if (result.closed()) {
                 markClosedByQuery();
-                return NativeIoResult.CLOSED;
             }
-
-            if (result.wouldBlock()) {
-                return NativeIoResult.WOULD_BLOCK;
-            }
-
-            var n = result.bytes();
-            source.position(source.position() + n);
-            return NativeIoResult.progressed(n);
+            return result;
         }
-
-        try (var arena = Arena.ofConfined()) {
-            var directSlice = source.slice();
-            directSlice.limit(toWrite);
-            var segment = arena.allocate(toWrite, 1);
-            segment.copyFrom(MemorySegment.ofBuffer(directSlice));
-            var result = owner.context().connectionWrite(id, segment, toWrite);
-
-            if (result.closed()) {
-                markClosedByQuery();
-                return NativeIoResult.CLOSED;
-            }
-
-            if (result.wouldBlock()) {
-                return NativeIoResult.WOULD_BLOCK;
-            }
-
-            var n = result.bytes();
-            source.position(source.position() + n);
-            return NativeIoResult.progressed(n);
+        if (dataPlaneState != DataPlane.LEGACY) {
+            return NativeIoResult.CLOSED;
         }
+        return writeLegacy(source);
     }
 
     @Override
     public NativeIoResult read(ByteBuffer target) {
         ensureOpen();
+        var plane = ensureDataPlane();
+        if (plane != null) {
+            var result = plane.read(target);
+            if (result.closed()) {
+                markClosedByQuery();
+            }
+            return result;
+        }
+        if (dataPlaneState != DataPlane.LEGACY) {
+            return NativeIoResult.CLOSED;
+        }
+        return readLegacy(target);
+    }
+
+    private NativeIoResult readLegacy(ByteBuffer target) {
         var capacity = target.remaining();
         if (capacity == 0) {
             return NativeIoResult.progressed(0);
@@ -216,6 +204,16 @@ public final class FfmNativeConnection implements NativeConnection {
             lifecycle = LifecycleState.CLOSING;
         }
 
+        // Invalidate the Java-side mapping before the native close can drop the Rust-owned region.
+        try {
+            releaseDataPlane(true);
+        } catch (RuntimeException e) {
+            synchronized (this) {
+                lifecycle = LifecycleState.CLOSE_FAILED;
+            }
+            throw e;
+        }
+
         try {
             owner.context().connectionClose(id);
             synchronized (this) {
@@ -249,6 +247,58 @@ public final class FfmNativeConnection implements NativeConnection {
         }
     }
 
+    /**
+     * Selects and lazily maps the data plane on the first data operation.
+     *
+     * <p>The mapping deliberately does not happen in the constructor: an ACCEPTED event can be
+     * delivered on a Rust upcall thread, and re-entering native code there would be an avoidable
+     * FFI reentrancy hazard.
+     */
+    private @Nullable FfmSharedConnectionIo ensureDataPlane() {
+        var plane = directPlane;
+        if (plane != null) {
+            return plane;
+        }
+
+        synchronized (dataPlaneLock) {
+            if (directPlane != null) {
+                return directPlane;
+            }
+
+            if (dataPlaneState == DataPlane.DIRECT
+                    || dataPlaneState == DataPlane.CLOSED
+                    || dataPlaneState == DataPlane.LEGACY
+            ) {
+                return null;
+            }
+
+            if (sharedIoMode == SharedIoMode.OFF) {
+                dataPlaneState = DataPlane.LEGACY;
+                return null;
+            }
+
+            if (lifecycle != LifecycleState.OPEN) {
+                dataPlaneState = DataPlane.CLOSED;
+                return null;
+            }
+
+            if (!owner.context().supportsSharedRingIo()) {
+                if (sharedIoMode == SharedIoMode.ON) {
+                    throw new NativeException(
+                            "Shared-ring IO was requested (netbridge.native.sharedIo=on) but the native backend does not advertise support"
+                    );
+                }
+                dataPlaneState = DataPlane.LEGACY;
+                return null;
+            }
+
+            var mapped = FfmSharedConnectionIo.map(owner.context(), id);
+            directPlane = mapped;
+            dataPlaneState = DataPlane.DIRECT;
+            return mapped;
+        }
+    }
+
     private void markClosedByQuery() {
         NativeConnectionListener l;
         NativeConnectionState prev;
@@ -262,10 +312,61 @@ public final class FfmNativeConnection implements NativeConnection {
         }
         owner.unregisterConnection(id);
         releaseServerOwnership();
+        releaseDataPlane(false);
         if (l != null
                 && prev != NativeConnectionState.CLOSED
         ) {
             l.onStateChanged(NativeConnectionState.CLOSED, reason);
+        }
+    }
+
+    private NativeIoResult writeLegacy(ByteBuffer source) {
+        var remaining = source.remaining();
+
+        if (remaining == 0) {
+            return NativeIoResult.progressed(0);
+        }
+        var toWrite = Math.min(remaining, 65536);
+
+        if (source.isDirect()) {
+            var directSlice = source.slice();
+            directSlice.limit(toWrite);
+            var segment = MemorySegment.ofBuffer(directSlice);
+            var result = owner.context().connectionWrite(id, segment, toWrite);
+
+            if (result.closed()) {
+                markClosedByQuery();
+                return NativeIoResult.CLOSED;
+            }
+
+            if (result.wouldBlock()) {
+                return NativeIoResult.WOULD_BLOCK;
+            }
+
+            var n = result.bytes();
+            source.position(source.position() + n);
+            return NativeIoResult.progressed(n);
+        }
+
+        try (var arena = Arena.ofConfined()) {
+            var directSlice = source.slice();
+            directSlice.limit(toWrite);
+            var segment = arena.allocate(toWrite, 1);
+            segment.copyFrom(MemorySegment.ofBuffer(directSlice));
+            var result = owner.context().connectionWrite(id, segment, toWrite);
+
+            if (result.closed()) {
+                markClosedByQuery();
+                return NativeIoResult.CLOSED;
+            }
+
+            if (result.wouldBlock()) {
+                return NativeIoResult.WOULD_BLOCK;
+            }
+
+            var n = result.bytes();
+            source.position(source.position() + n);
+            return NativeIoResult.progressed(n);
         }
     }
 
@@ -275,10 +376,46 @@ public final class FfmNativeConnection implements NativeConnection {
         }
     }
 
+    /**
+     * Invalidates the Java-side mapping exactly once. Runs before {@code connectionClose} (or on a
+     * terminal event) so the Rust-owned region can never be freed while Java may still copy.
+     */
+    private void releaseDataPlane(boolean propagateFailure) {
+        FfmSharedConnectionIo plane;
+        synchronized (dataPlaneLock) {
+            plane = directPlane;
+            directPlane = null;
+            dataPlaneState = DataPlane.CLOSED;
+        }
+        if (plane == null) {
+            return;
+        }
+        try {
+            plane.close(FfmSharedConnectionIo.DEFAULT_CLOSE_DRAIN_MILLIS);
+        } catch (RuntimeException e) {
+            if (propagateFailure) {
+                throw e;
+            }
+        }
+    }
+
     private void ensureOpen() {
         if (lifecycle == LifecycleState.CLOSED) {
             throw new NativeException("NativeConnection " + id + " is closed");
         }
+    }
+
+    /** True when the direct shared-ring data plane was selected for this connection. */
+    boolean directDataPlaneActive() {
+        return dataPlaneState == DataPlane.DIRECT;
+    }
+
+    /** The mapped region of the direct data plane, or {@code null} when it is not active. */
+    @Nullable FfmSharedIoRegion directRegion() {
+        var plane = directPlane;
+        return plane == null
+                ? null
+                : plane.region();
     }
 
     public NativeFailureReason failureReason() {
@@ -321,6 +458,7 @@ public final class FfmNativeConnection implements NativeConnection {
             }
             owner.unregisterConnection(id);
             releaseServerOwnership();
+            releaseDataPlane(false);
         }
     }
 
@@ -348,6 +486,21 @@ public final class FfmNativeConnection implements NativeConnection {
         CLOSING,
         CLOSED,
         CLOSE_FAILED
+
+    }
+
+    /**
+     * Lazily resolved data-plane selection for this connection.
+     *
+     * <p>{@code UNINITIALIZED} is resolved on the first data operation; {@code CLOSED} permanently
+     * rejects further data operations.
+     */
+    private enum DataPlane {
+
+        UNINITIALIZED,
+        DIRECT,
+        LEGACY,
+        CLOSED
 
     }
 

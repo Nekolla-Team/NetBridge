@@ -1,5 +1,6 @@
 package top.tangge233.netbridge.benchmark.bridge;
 
+import top.tangge233.netbridge.config.SharedIoMode;
 import top.tangge233.netbridge.nativebridge.*;
 import top.tangge233.netbridge.nativebridge.internal.ffm.FfmNativeContext;
 import top.tangge233.netbridge.nativebridge.internal.ffm.FfmNativeTransportBackend;
@@ -75,9 +76,47 @@ public final class NativeBridgeFixture implements AutoCloseable {
             boolean feedClient,
             int feedChunkBytes
     ) {
+        return open(
+                nativeLibrary,
+                workers,
+                drainServer,
+                feedClient,
+                feedChunkBytes,
+                SharedIoMode.DEFAULT,
+                0,
+                0
+        );
+    }
+
+    /**
+     * Full form used by the shared-ring A/B and capacity benchmarks: selects the Java data plane
+     * ({@code auto}/{@code on}/{@code off}) and, when direct, the per-connection ring capacities.
+     */
+    public static NativeBridgeFixture open(
+            Path nativeLibrary,
+            int workers,
+            boolean drainServer,
+            boolean feedClient,
+            int feedChunkBytes,
+            SharedIoMode sharedIoMode,
+            int sharedIoTxCapacity,
+            int sharedIoRxCapacity
+    ) {
         try {
-            var clientBackend = FfmNativeTransportBackend.load(nativeLibrary, workers);
-            var serverBackend = FfmNativeTransportBackend.load(nativeLibrary, workers);
+            var clientBackend = FfmNativeTransportBackend.load(
+                    nativeLibrary,
+                    workers,
+                    sharedIoMode,
+                    sharedIoTxCapacity,
+                    sharedIoRxCapacity
+            );
+            var serverBackend = FfmNativeTransportBackend.load(
+                    nativeLibrary,
+                    workers,
+                    sharedIoMode,
+                    sharedIoTxCapacity,
+                    sharedIoRxCapacity
+            );
             try {
                 var server = serverBackend.startServer(
                         NativeServerRequest.quic(0, 16)

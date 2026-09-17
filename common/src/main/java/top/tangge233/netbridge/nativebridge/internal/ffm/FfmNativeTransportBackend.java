@@ -1,6 +1,7 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
 import top.tangge233.netbridge.NetBridge;
+import top.tangge233.netbridge.config.SharedIoMode;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.nio.file.Path;
@@ -15,6 +16,9 @@ public final class FfmNativeTransportBackend
 
     private final FfmNativeLibrary library;
     private final FfmNativeContext context;
+    private final SharedIoMode sharedIoMode;
+    private final int sharedIoTxCapacity;
+    private final int sharedIoRxCapacity;
     private final Map<Long, FfmNativeConnection> connections = new ConcurrentHashMap<>();
     private final Map<Long, FfmNativeServer> servers = new ConcurrentHashMap<>();
     private final Map<Long, PendingConnRecord> pendingConnections = new ConcurrentHashMap<>();
@@ -23,20 +27,61 @@ public final class FfmNativeTransportBackend
 
     private FfmNativeTransportBackend(
             FfmNativeLibrary library,
-            FfmNativeContext context
+            FfmNativeContext context,
+            SharedIoMode sharedIoMode,
+            int sharedIoTxCapacity,
+            int sharedIoRxCapacity
     ) {
+        super();
         this.library = library;
         this.context = context;
+        this.sharedIoMode = sharedIoMode;
+        this.sharedIoTxCapacity = sharedIoTxCapacity;
+        this.sharedIoRxCapacity = sharedIoRxCapacity;
     }
 
     public static FfmNativeTransportBackend load(
             Path libraryPath,
             int workerThreads
     ) {
+        return load(
+                libraryPath,
+                workerThreads,
+                SharedIoMode.DEFAULT,
+                0,
+                0
+        );
+    }
+
+    /**
+     * Loads the native backend and selects the Java data plane.
+     *
+     * <p>{@link SharedIoMode#ON} is validated eagerly: if the native table does not advertise the
+     * shared-ring feature the backend is reported unavailable instead of failing later on the first
+     * data-plane operation.
+     */
+    public static FfmNativeTransportBackend load(
+            Path libraryPath,
+            int workerThreads,
+            SharedIoMode sharedIoMode,
+            int sharedIoTxCapacity,
+            int sharedIoRxCapacity
+    ) {
         var library = FfmNativeLibrary.load(libraryPath);
+        if (sharedIoMode == SharedIoMode.ON && !library.api().supportsSharedRingIo()) {
+            library.close();
+            throw new NativeException(
+                    "Shared-ring IO was requested (netbridge.native.sharedIo=on) but the native library does not support it"
+            );
+        }
+
         FfmNativeContext context;
         try {
-            context = library.createContext(workerThreads);
+            context = library.createContext(
+                    workerThreads,
+                    sharedIoTxCapacity,
+                    sharedIoRxCapacity
+            );
         } catch (Throwable t) {
             library.close();
             if (t instanceof RuntimeException re) {
@@ -44,7 +89,13 @@ public final class FfmNativeTransportBackend
             }
             throw new RuntimeException("Failed to create native context", t);
         }
-        var backend = new FfmNativeTransportBackend(library, context);
+        var backend = new FfmNativeTransportBackend(
+                library,
+                context,
+                sharedIoMode,
+                sharedIoTxCapacity,
+                sharedIoRxCapacity
+        );
         backend.state = NativeBackendState.AVAILABLE;
         context.dispatcher().addListener(backend);
         return backend;
@@ -52,6 +103,18 @@ public final class FfmNativeTransportBackend
 
     public FfmNativeContext context() {
         return context;
+    }
+
+    SharedIoMode sharedIoMode() {
+        return sharedIoMode;
+    }
+
+    int sharedIoTxCapacity() {
+        return sharedIoTxCapacity;
+    }
+
+    int sharedIoRxCapacity() {
+        return sharedIoRxCapacity;
     }
 
     @Override
@@ -390,6 +453,7 @@ public final class FfmNativeTransportBackend
         volatile boolean accepted = false;
 
         PendingConnRecord(long connId) {
+            super();
             this.connId = connId;
         }
 
