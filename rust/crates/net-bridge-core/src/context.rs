@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::FutureExt;
 use net_bridge_shared_io::SharedRing;
@@ -468,25 +467,6 @@ impl NativeContext {
         Ok(io.read_legacy(dst))
     }
 
-    /// Convenience wrapper over [`Self::write_chunk_legacy`] that accepts [`Bytes`].
-    pub fn write_chunk(&self, conn: u64, data: Bytes) -> Result<usize, BridgeError> {
-        self.write_chunk_legacy(conn, &data)
-    }
-
-    /// Convenience wrapper over [`Self::read_chunk_legacy`] that returns a [`Bytes`] buffer.
-    pub fn read_chunk(&self, conn: u64, max_bytes: usize) -> Result<Bytes, BridgeError> {
-        if max_bytes == 0 {
-            return Ok(Bytes::new());
-        }
-        let mut buf = vec![0u8; max_bytes];
-        let n = self.read_chunk_legacy(conn, &mut buf)?;
-        if n == 0 {
-            return Ok(Bytes::new());
-        }
-        buf.truncate(n);
-        Ok(Bytes::from(buf))
-    }
-
     /// Returns the shared IO ring descriptor for a connection and claims shared-direct access.
     ///
     /// Repeated calls are allowed; mixing with the legacy ABI on the same connection fails with
@@ -869,15 +849,15 @@ mod tests {
 
             let payload = format!("cycle-{cycle}-payload").into_bytes();
             assert_eq!(
-                ctx.write_chunk(client, Bytes::copy_from_slice(&payload))
-                    .expect("write"),
+                ctx.write_chunk_legacy(client, &payload).expect("write"),
                 payload.len()
             );
             let read_deadline = Instant::now() + Duration::from_secs(5);
+            let mut buf = vec![0u8; 65536];
             let mut got = 0usize;
             while got < payload.len() && Instant::now() < read_deadline {
-                match ctx.read_chunk(server_conn, 65536) {
-                    Ok(data) if !data.is_empty() => got += data.len(),
+                match ctx.read_chunk_legacy(server_conn, &mut buf) {
+                    Ok(n) if n > 0 => got += n,
                     _ => std::thread::sleep(Duration::from_millis(10)),
                 }
             }

@@ -1,6 +1,5 @@
 //! QUIC facade integration tests: real QUIC round trips, close propagation, and native quinn loopback.
 
-use bytes::Bytes;
 use std::time::{Duration, Instant};
 
 use crate::context::NativeContext;
@@ -45,13 +44,12 @@ fn wait_terminal(ctx: &NativeContext, conn: u64) {
 
 fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = vec![0u8; 65536];
     loop {
-        let res = ctx.read_chunk(conn, 65536);
-        if let Ok(data) = res
-            && !data.is_empty()
-            && data.len() >= want
+        if let Ok(n) = ctx.read_chunk_legacy(conn, &mut buf)
+            && n >= want
         {
-            return data.to_vec();
+            return buf[..n].to_vec();
         }
         assert!(Instant::now() < deadline, "timeout waiting for read");
         std::thread::sleep(Duration::from_millis(5));
@@ -105,7 +103,7 @@ fn quic_loopback_roundtrip() {
     let server_conn = wait_accepted(&sink, server);
     wait_state(&ctx, server_conn, STATE_CONNECTED);
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+        ctx.write_chunk_legacy(client, payload)
             .expect("client write"),
         payload.len()
     );
@@ -115,7 +113,7 @@ fn quic_loopback_roundtrip() {
     // server -> client
     let reply = b"pong from server";
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+        ctx.write_chunk_legacy(server_conn, reply)
             .expect("server write"),
         reply.len()
     );
@@ -146,7 +144,7 @@ async fn quic_server_stop_does_not_kill_adopted_connections() {
     // Established connections already owned by Java must remain alive and support normal I/O
     let payload = b"data after server stopped";
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+        ctx.write_chunk_legacy(client, payload)
             .expect("client write"),
         payload.len()
     );
@@ -154,7 +152,7 @@ async fn quic_server_stop_does_not_kill_adopted_connections() {
 
     let reply = b"server reply after server stopped";
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+        ctx.write_chunk_legacy(server_conn, reply)
             .expect("server write"),
         reply.len()
     );
@@ -218,7 +216,7 @@ async fn quic_accepted_guarantees_stream_readiness_and_no_accepted_on_stream_fai
 
     // Server replies
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(b"ack"))
+        ctx.write_chunk_legacy(server_conn, b"ack")
             .expect("server write"),
         3
     );

@@ -10,7 +10,7 @@ import org.jspecify.annotations.Nullable;
  * support and silently falls back to the legacy {@code connection_write}/{@code connection_read}
  * ABI otherwise. {@link #ON} requires the direct data plane and fails fast when it is unavailable.
  * {@link #OFF} forces the legacy ABI path, which is the documented rollback switch for the shared
- * ring data plane.
+ * ring data plane. The shared-ring data plane is stable; {@link #AUTO} is the default (ADR-0013).
  */
 public enum SharedIoMode {
 

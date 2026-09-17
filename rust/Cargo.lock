@@ -692,7 +692,6 @@ version = "0.1.0"
 name = "net-bridge-core"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "dashmap",
  "fec",
  "futures-util",

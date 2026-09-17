@@ -12,7 +12,6 @@ socket2 = "0.6"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-proto = "0.11"
 quinn-plaintext = "0.3"
-bytes = "1"
 fec = "0.2.2"
 kcp-rs = "0.2.6"
 smux = "0.2"

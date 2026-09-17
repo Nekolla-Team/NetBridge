@@ -50,21 +50,34 @@ refactor-plan record.
     - **balance**: nodelay=0/interval=40/resend=0/nc=0, mtu=1300, wnd= (256,256), stream=true.
     - **aggressive**: nodelay=1/interval=10/resend=2/nc=1; all other parameters are the same.
 
-## Data Plane (ADR-0009/0010)
+## Data Plane (ADR-0009/0010/0013)
 
-- **Write path**: Netty direct ByteBuf → `nioBuffer`, borrowed zero-copy by
-  `NativeConnection.write` → FFM downcall. Rust copies into its own `Bytes` queue before the
-  downcall returns; heap/composite buffers use one pooled direct scratch copy. A chunk is capped at
-  64KiB and is accepted or rejected atomically (`NB_WOULD_BLOCK` means the queue is full).
-- **Read path**: write directly into a destination direct `ByteBuffer`; no Java heap `byte[]`
-  intermediate and no JNI direct-buffer special case.
-- **Queue limits**: command channel 4096, data channel 8192 chunks; backpressure is reported with
-  `NB_WOULD_BLOCK`.
+- **Shared SPSC rings**: every connection carries a Rust-owned TX ring (Java → transport) and RX
+  ring (transport → Java) defined by `net-bridge-shared-io`. The region header is 192 bytes followed
+  by a power-of-two data area (64KiB minimum, 128-byte aligned); the default capacity is 128KiB per
+  direction. `net-bridge-core` stays `#![forbid(unsafe_code)]`; ring memory and the wait-state
+  atomics are confined to `net-bridge-shared-io`.
+- **Direct path**: with `netbridge.native.sharedIo=auto|on` on a backend that advertises the
+  shared-ring feature, Java maps both regions (`FfmSharedConnectionIo`) and reads/writes them
+  directly. A connection is single-writer/single-reader with Acquire/Release cursors and a
+  `ACTIVE`/`PARKED`/`NOTIFIED` wait-state protocol, so steady traffic does not need a per-chunk FFM
+  downcall.
+- **Legacy path**: `connection_write`/`connection_read` are the compatibility shim and copy into/out
+  of the same rings; they are retained for the whole ABI major 1 lifetime. Mixing legacy and direct
+  access on one connection fails fast with `NB_INVALID_STATE`.
+- **Backpressure**: partial progress is allowed; `NB_WOULD_BLOCK` is returned only when the ring has
+  zero free space (write) or is empty (read).
+- **Lifecycle**: Rust owns the ring memory. Java views are closed through `SharedIoLeaseGate` before
+  the native connection is released, so Rust never frees memory a Java view can still reach.
+- **Configuration**: `netbridge.native.sharedIo` (`auto`/`on`/`off`, default `auto`) plus
+  `netbridge.native.sharedIo.txCapacity`/`.rxCapacity` (0 selects the native default; 64KiB–1MiB,
+  power of two). `off` is the documented instant rollback to the legacy shim.
 - **Event model**: Rust emits
   `CONNECTION_STATE(1)/DATA_AVAILABLE(2)/WRITABLE(3)/ACCEPTED(4)/SERVER_STATE(5)` through
-  `EventSink::on_event` on state transitions, data enqueue, write-queue recovery, and server accept.
-  Java has no polling tasks (channel polling, the 5ms accept thread, and `ADOPT_EXECUTOR` polling
-  are removed). DATA_AVAILABLE is debounced/coalesced on Java; WRITABLE clears write backpressure.
+  `EventSink::on_event`. `DATA_AVAILABLE` and `WRITABLE` are edge-triggered: they fire only when the
+  wait-state `PARKED→NOTIFIED` transition succeeds, so idle connections generate no wakeups and the
+  data plane has no polling, periodic timer, or busy-spin. Java has no polling tasks (channel
+  polling, the 5ms accept thread, and `ADOPT_EXECUTOR` polling are removed).
 - **Event-thread discipline**: upcalls run on Rust Tokio workers; Java callbacks only route/marshal
   work, never execute Minecraft business logic or block.
 - **Connection-state ABI values**: CONNECTING=1 / CONNECTED=2 / CLOSED=3 / FAILED=4 (core internal

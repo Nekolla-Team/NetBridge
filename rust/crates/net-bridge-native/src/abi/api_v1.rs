@@ -308,6 +308,11 @@ unsafe extern "C" fn connection_remote_address(
     })
 }
 
+/// Legacy `connection_write` compatibility shim.
+///
+/// Copies into the connection's shared TX ring. Partial progress is allowed; `NB_WOULD_BLOCK` is
+/// returned only when no free space remains. Retained for the whole ABI major 1 lifetime (see
+/// ADR-0013); new Java code uses `connection_io_region`.
 unsafe extern "C" fn connection_write(
     context: *mut NbContext,
     connection: u64,
@@ -348,6 +353,10 @@ unsafe extern "C" fn connection_write(
     })
 }
 
+/// Legacy `connection_read` compatibility shim.
+///
+/// Copies out of the connection's shared RX ring. Retained for the whole ABI major 1 lifetime (see
+/// ADR-0013); new Java code uses `connection_io_region`.
 unsafe extern "C" fn connection_read(
     context: *mut NbContext,
     connection: u64,

@@ -1,6 +1,5 @@
 //! KCP facade integration tests: real KCP round trips and close propagation, including the probe-frame path.
 
-use bytes::Bytes;
 use std::time::{Duration, Instant};
 
 use crate::context::NativeContext;
@@ -39,11 +38,12 @@ fn wait_disconnected(ctx: &NativeContext, conn: u64) {
 
 fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = vec![0u8; 65536];
     loop {
-        if let Ok(data) = ctx.read_chunk(conn, 65536)
-            && data.len() >= want
+        if let Ok(n) = ctx.read_chunk_legacy(conn, &mut buf)
+            && n >= want
         {
-            return data.to_vec();
+            return buf[..n].to_vec();
         }
         assert!(Instant::now() < deadline, "timeout waiting for read");
         std::thread::sleep(Duration::from_millis(5));
@@ -95,7 +95,7 @@ fn kcp_loopback_roundtrip() {
 
     let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(
-        ctx.write_chunk(client, Bytes::from(payload.clone()))
+        ctx.write_chunk_legacy(client, &payload)
             .expect("client write"),
         payload.len(),
         "kcp client must accept writes while connecting"
@@ -113,7 +113,7 @@ fn kcp_loopback_roundtrip() {
     // server -> client
     let reply = b"pong over kcp";
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+        ctx.write_chunk_legacy(server_conn, reply)
             .expect("server write"),
         reply.len()
     );
@@ -137,7 +137,7 @@ fn kcp_sustained_and_idle_phase() {
 
     let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(
-        ctx.write_chunk(client, Bytes::from(payload.clone()))
+        ctx.write_chunk_legacy(client, &payload)
             .expect("client write"),
         payload.len()
     );
@@ -150,13 +150,12 @@ fn kcp_sustained_and_idle_phase() {
         round += 1;
         let msg = format!("active-{round}").into_bytes();
         assert_eq!(
-            ctx.write_chunk(client, Bytes::copy_from_slice(&msg))
-                .expect("cli write"),
+            ctx.write_chunk_legacy(client, &msg).expect("cli write"),
             msg.len()
         );
         wait_read(&ctx, server_conn, msg.len());
         assert_eq!(
-            ctx.write_chunk(server_conn, Bytes::copy_from_slice(&msg))
+            ctx.write_chunk_legacy(server_conn, &msg)
                 .expect("srv write"),
             msg.len()
         );
@@ -187,13 +186,12 @@ fn kcp_sustained_and_idle_phase() {
 
     let msg = b"resume-after-idle";
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(msg))
-            .expect("cli resume"),
+        ctx.write_chunk_legacy(client, msg).expect("cli resume"),
         msg.len()
     );
     wait_read(&ctx, server_conn, msg.len());
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(msg))
+        ctx.write_chunk_legacy(server_conn, msg)
             .expect("srv resume"),
         msg.len()
     );
@@ -220,7 +218,7 @@ fn kcp_peer_close_propagates_to_client() {
     eprintln!("KCP CLIENT CONNECT: {client}");
 
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(b"warm-up"))
+        ctx.write_chunk_legacy(client, b"warm-up")
             .expect("warm-up write"),
         7
     );
@@ -254,7 +252,7 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
         .expect("kcp connect");
 
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(b"warm-up"))
+        ctx.write_chunk_legacy(client, b"warm-up")
             .expect("warm-up write"),
         7
     );
@@ -269,7 +267,7 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
     // Established connections already owned by Java must remain alive and support normal I/O
     let payload = b"kcp data after server stopped";
     assert_eq!(
-        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+        ctx.write_chunk_legacy(client, payload)
             .expect("client write"),
         payload.len()
     );
@@ -277,7 +275,7 @@ fn kcp_server_stop_does_not_kill_adopted_connections() {
 
     let reply = b"kcp server reply after server stopped";
     assert_eq!(
-        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+        ctx.write_chunk_legacy(server_conn, reply)
             .expect("server write"),
         reply.len()
     );

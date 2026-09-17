@@ -46,9 +46,14 @@ Typical log: `net-bridge native unavailable; accelerated transports disabled (TC
 - Unsupported platform: error code `UNSUPPORTED_PLATFORM`, including normalized os/arch.
 - Local native debugging: `-Dnetbridge.native.path=/abs/path/libnet_bridge_native.so`
   takes precedence over packaged resources; production has no `java.library.path` fallback.
-- System properties (transport/quicPort/native.path/cache.dir) are parsed centrally by
+- System properties (transport/quicPort/native.path/cache.dir/sharedIo) are parsed centrally by
   `NetBridgeProperties` and injected through the composition root. New properties must not be read
   ad hoc with `System.getProperty` in business code.
+- Shared-ring data plane: `-Dnetbridge.native.sharedIo=auto|on|off` (default `auto`). `on` fails
+  fast when the native library does not advertise the shared-ring feature; `off` forces the legacy
+  `connection_write`/`connection_read` shim and is the instant rollback for the direct data plane.
+  Ring sizes are `netbridge.native.sharedIo.txCapacity`/`.rxCapacity` (power of two, 64KiB–1MiB; 0
+  selects the 128KiB native default).
 - Build verification: `./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest`.
 - Packaging verification: `./gradlew fabric:verifyFabricPackaging neoforge:verifyNeoForgePackaging`
   asserts exactly one jackson-core, zero databind, nightconfig presence, complete native
