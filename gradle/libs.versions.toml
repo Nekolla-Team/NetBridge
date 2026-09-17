@@ -9,7 +9,7 @@ mixin = "0.15.2+mixin.0.8.7"
 jmh = "1.37"
 jmh-gradle = "0.7.3"
 
-kotlin = "2.3.21"
+kotlin = "2.4.20"
 clikt = "5.1.0"
 jte = "3.2.4"
 jsoup = "1.23.2"
