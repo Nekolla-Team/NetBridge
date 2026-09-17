@@ -1,0 +1,79 @@
+version: 2
+updates:
+  # Java/Kotlin: root build.gradle.kts + gradle/libs.versions.toml + build-logic + subprojects
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 50
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      gradle-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Mod toolchain pinned to the Minecraft 1.21.1 line: patch only.
+      - dependency-name: "com.mojang:minecraft"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "net.fabricmc:fabric-loader"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "net.fabricmc:sponge-mixin"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "fabric-loom"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "net.neoforged.moddev"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # Rust workspace (rust/Cargo.toml + Cargo.lock)
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 50
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Pre-1.0: a 0.x minor bump is breaking; update these by hand.
+      - dependency-name: "kcp-rs"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "smux"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # GitHub Actions used by .github/workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 50
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
