@@ -16,7 +16,7 @@ jsoup = "1.23.2"
 
 netty = "4.1.97.Final"
 slf4j = "2.0.19"
-jackson = "3.1.6"
+jackson = "3.2.2"
 night-config = "3.9.0"
 
 junit = "6.1.3"
