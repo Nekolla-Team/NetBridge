@@ -4,7 +4,7 @@ neoforge = "21.1.183"
 neoforge-moddev = "1.0.24"
 fabric-loom = "1.17.21"
 fabric-loader = "0.17.3"
-mixin = "0.15.2+mixin.0.8.7"
+mixin = "0.15.5+"
 
 jmh = "1.37"
 jmh-gradle = "0.7.3"
