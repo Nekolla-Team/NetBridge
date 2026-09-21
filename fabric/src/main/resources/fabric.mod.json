@@ -8,7 +8,7 @@
   "environment": "*",
   "entrypoints": {
     "main": [
-      "top.tangge233.netbridge.fabric.NetBridgeFabricMod"
+      "team.nekolla.netbridge.fabric.NetBridgeFabricMod"
     ]
   },
   "mixins": [

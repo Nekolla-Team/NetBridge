@@ -1,4 +1,4 @@
-@import top.tangge233.netbridge.benchmarkreport.model.ReportPage
+@import team.nekolla.netbridge.benchmarkreport.model.ReportPage
 
 @param ReportPage page
 <!doctype html>

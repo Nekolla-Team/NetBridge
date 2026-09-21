@@ -1,4 +1,4 @@
-@import top.tangge233.netbridge.benchmarkreport.index.CatalogData
+@import team.nekolla.netbridge.benchmarkreport.index.CatalogData
 @param CatalogData data
 <!doctype html>
 <html lang="en">

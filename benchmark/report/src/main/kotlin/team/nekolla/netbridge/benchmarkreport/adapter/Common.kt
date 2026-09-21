@@ -1,0 +1,107 @@
+package team.nekolla.netbridge.benchmarkreport.adapter
+
+import team.nekolla.netbridge.benchmark.model.BenchmarkEnvironment
+import team.nekolla.netbridge.benchmark.model.BenchmarkSuite
+import team.nekolla.netbridge.benchmark.model.TransportConfigurationSnapshot
+import team.nekolla.netbridge.benchmarkreport.dsl.KeyValue
+import team.nekolla.netbridge.benchmarkreport.format.HumanUnits
+
+internal object SuiteTitles {
+
+    fun of(suite: String): String =
+        when (BenchmarkSuite.fromId(suite)) {
+            BenchmarkSuite.TRANSPORT -> "L2 Transport Comparison"
+            BenchmarkSuite.CHANNEL -> "L3B NativeChannel Integration"
+            BenchmarkSuite.MINECRAFT_SHAPED -> "L4A Minecraft-shaped Workload"
+            BenchmarkSuite.MINECRAFT -> "Real Minecraft Session"
+            null -> "Benchmark"
+        }
+
+    fun jmh(results: List<JmhResultDto>): String {
+        val className = results
+            .firstOrNull { it.benchmark.substringBeforeLast('.').isNotBlank() }
+            ?.benchmark?.substringBeforeLast('.')
+            ?: return "JMH Microbenchmarks"
+        return when {
+            className.contains(".ffm.") -> "L0 Raw FFM"
+            className.contains(".bridge.") -> "L1 Production Native Bridge"
+            className.contains(".channel.") -> "L3A NativeChannel"
+            else -> "JMH Microbenchmarks"
+        }
+    }
+
+}
+
+internal fun gitLabel(
+    gitCommit: String?,
+    gitDirty: Boolean?
+): String? =
+    if (gitCommit.isNullOrBlank()) {
+        null
+    } else if (gitDirty == true) {
+        "$gitCommit (dirty)"
+    } else {
+        gitCommit
+    }
+
+internal fun environmentEntries(env: BenchmarkEnvironment): List<KeyValue> =
+    buildList {
+        fun put(key: String, value: String?) {
+            if (value != null) add(KeyValue(key, value))
+        }
+
+        put("suiteVersion", env.suiteVersion)
+        put("measurementMethodVersion", env.measurementMethodVersion)
+        put("timestamp", env.timestamp.toString())
+        put("gitCommit", env.gitCommit)
+        put("gitDirty", env.gitDirty?.toString())
+        put("os", env.os)
+        put("osVersion", env.osVersion)
+        put("arch", env.arch)
+        put("availableProcessors", env.availableProcessors.toString())
+        put("cpuModel", env.cpuModel)
+        put("logicalCores", env.logicalCores?.toString())
+        put("jdkVendor", env.jdkVendor)
+        put("jdkVersion", env.jdkVersion)
+        put("jvmName", env.jvmName)
+        put("jvmVersion", env.jvmVersion)
+        put("jvmArgs", env.jvmArgs)
+        put("jvmGc", env.jvmGc)
+        put("maxHeapBytes", env.maxHeapBytes.toString())
+        put("loadAverage", env.loadAverage?.toString())
+        put("containerHint", env.containerHint)
+        put("networkProfile", env.networkProfile)
+        put("rustVersion", env.rustVersion)
+        put("nativeWorkerCount", env.nativeWorkerCount.toString())
+        put("nativeLibrary", env.nativeLibrary)
+        put("nativeLibrarySha256", env.nativeLibrarySha256)
+        for ((name, node) in env.unknownFields()) {
+            add(KeyValue(name, node.toString()))
+        }
+    }
+
+internal fun transportConfigurationEntries(
+    config: TransportConfigurationSnapshot
+): List<KeyValue> =
+    listOf(
+        KeyValue("transports", config.transports.toString()),
+        KeyValue("cases", config.cases.toString()),
+        KeyValue("host", config.host),
+        KeyValue("port", config.port.toString()),
+        KeyValue("workers", config.workers.toString()),
+        KeyValue("rttPayloads", config.rttPayloads.pretty()),
+        KeyValue("throughputDurationMillis", config.throughputDurationMillis.toString()),
+        KeyValue("connectIterations", config.connectIterations.toString()),
+        KeyValue("rttMeasuredIterations", config.rttMeasuredIterations.toString()),
+        KeyValue("startServer", config.startServer.toString()),
+        KeyValue("repetitions", config.repetitions.toString()),
+        KeyValue("seed", config.seed.toString()),
+        KeyValue("nativeLibrary", config.nativeLibrary ?: HumanUnits.MISSING)
+    )
+
+internal fun List<*>.pretty(): String =
+    joinToString(
+        prefix = "[",
+        separator = ", ",
+        postfix = "]"
+    )

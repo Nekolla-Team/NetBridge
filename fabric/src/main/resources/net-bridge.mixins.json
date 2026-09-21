@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "top.tangge233.netbridge.mixin",
+  "package": "team.nekolla.netbridge.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "ClientboundStatusResponsePacketMixin",
