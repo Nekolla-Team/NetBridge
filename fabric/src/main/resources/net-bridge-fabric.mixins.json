@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "top.tangge233.netbridge.fabric.mixin",
+  "package": "team.nekolla.netbridge.fabric.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "MinecraftServerLifecycleMixin"

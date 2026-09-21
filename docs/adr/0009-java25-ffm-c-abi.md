@@ -20,7 +20,7 @@ state ownership, and callbacks into their intended final form, removing JNI comp
    multi-release jar. Mod metadata declares `java >= 25`, with a clear bootstrap guard retained.
 
 2. **FFM is a leaf dependency**. `java.lang.foreign` is allowed only in
-   `top.tangge233.netbridge.nativebridge.internal.ffm`; it must not appear in channel / client /
+   `team.nekolla.netbridge.nativebridge.internal.ffm`; it must not appear in channel / client /
    server / config / minecraft / fabric / neoforge layers. Upper layers see only typed abstractions
    such as
    `NativeTransportBackend` / `NativeConnection` / `NativeServer`.

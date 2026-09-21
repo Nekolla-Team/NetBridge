@@ -1,7 +1,7 @@
 import org.gradle.internal.os.OperatingSystem.current
-import top.tangge233.netbridge.build.BuildNativeLibrary
-import top.tangge233.netbridge.build.NativePlatform.cdylibName
-import top.tangge233.netbridge.build.NativePlatform.subdir
+import team.nekolla.netbridge.build.BuildNativeLibrary
+import team.nekolla.netbridge.build.NativePlatform.cdylibName
+import team.nekolla.netbridge.build.NativePlatform.subdir
 import java.security.MessageDigest
 
 plugins {
@@ -251,14 +251,14 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         )
 
         val ffmAllowlistPrefix =
-            "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/"
+            "common/src/main/java/team/nekolla/netbridge/nativebridge/internal/ffm/"
 
         val runtimeAllowlist = setOf(
-            "common/src/main/java/top/tangge233/netbridge/runtime/NetBridgeServices.java"
+            "common/src/main/java/team/nekolla/netbridge/runtime/NetBridgeServices.java"
         )
 
         val mixinGuardAllowlist = setOf(
-            "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
+            "common/src/main/java/team/nekolla/netbridge/ability/StatusNetworksCapture.java"
         )
 
         // The benchmark recorder owns a single daemon writer thread so milestone
@@ -266,16 +266,16 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         // benchmark-only, disabled unless -Dnetbridge.benchmark=true, and is not part
         // of the production runtime lifecycle managed by the composition root.
         val staticExecutorAllowlist = setOf(
-            "minecraft/src/main/java/top/tangge233/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
+            "minecraft/src/main/java/team/nekolla/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
         )
 
         // Jackson Core may only be imported by the two NetBridge JSON codecs plus the
         // benchmark recorder boundary; Gson may only be imported in the shared Minecraft
         // adapter layer (Mojang boundary).
         val jsonCodecAllowlist = setOf(
-            "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCodec.java",
-            "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/NativeManifestCodec.java",
-            "minecraft/src/main/java/top/tangge233/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
+            "common/src/main/java/team/nekolla/netbridge/ability/StatusNetworksCodec.java",
+            "common/src/main/java/team/nekolla/netbridge/nativebridge/internal/ffm/NativeManifestCodec.java",
+            "minecraft/src/main/java/team/nekolla/netbridge/mc/benchmark/MinecraftBenchmarkRecorder.java"
         )
 
         for (file in production) {
@@ -379,7 +379,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
 
             if (
                 text.contains(
-                    "import top.tangge233.netbridge.nativebridge.internal.ffm."
+                    "import team.nekolla.netbridge.nativebridge.internal.ffm."
                 ) &&
                 rel !in runtimeAllowlist &&
                 !rel.startsWith(ffmAllowlistPrefix)
@@ -420,9 +420,9 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         }
 
         val loaderDupDirs = listOf(
-            "fabric/src/main/java/top/tangge233/netbridge/fabric/mc",
-            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mc",
-            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mixin"
+            "fabric/src/main/java/team/nekolla/netbridge/fabric/mc",
+            "neoforge/src/main/java/team/nekolla/netbridge/neoforge/mc",
+            "neoforge/src/main/java/team/nekolla/netbridge/neoforge/mixin"
         )
 
         for (dir in loaderDupDirs) {
@@ -435,8 +435,8 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         }
 
         val pkgRoots = listOf(
-            "common/src/main/java/top/tangge233/netbridge",
-            "minecraft/src/main/java/top/tangge233/netbridge"
+            "common/src/main/java/team/nekolla/netbridge",
+            "minecraft/src/main/java/team/nekolla/netbridge"
         )
 
         for (rootPath in pkgRoots) {

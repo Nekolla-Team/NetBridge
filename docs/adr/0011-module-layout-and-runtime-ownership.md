@@ -19,12 +19,15 @@ independent static services plus implicit default bootstrapping.
 ### Module Layout
 
 ```text
-common      Pure Java domain/runtime/native abstractions/config (imports of net.minecraft and loader APIs are forbidden)
+common      Pure Java domain/runtime/native abstractions/config (imports of net.minecraft and
+            loader APIs are forbidden)
 minecraft   Shared Minecraft-aware layer: NativeClientTransport, NativeServerTransport,
-            seven shared mixins (top.tangge233.netbridge.mc / .mixin; loader API imports are forbidden)
+            seven shared mixins (team.nekolla.netbridge.mc / .mixin; loader API imports are
+            forbidden)
 fabric      Fabric bootstrap / lifecycle glue (MinecraftServerLifecycleMixin) / metadata only
 neoforge    NeoForge bootstrap / event glue / metadata only
-rust        workspace: net-bridge-core (pure transport core, forbid unsafe) + net-bridge-native (C ABI shell)
+rust        workspace: net-bridge-core (pure transport core, forbid unsafe) + net-bridge-native
+            (C ABI shell)
 ```
 
 The shared layer is compiled into both loaders as a source set. Both use Mojmap; Fabric is remapped

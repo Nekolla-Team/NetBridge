@@ -1,4 +1,4 @@
-import top.tangge233.netbridge.build.VerifyEmbeddedPackaging
+import team.nekolla.netbridge.build.VerifyEmbeddedPackaging
 
 plugins {
     id("netbridge.java-conventions")

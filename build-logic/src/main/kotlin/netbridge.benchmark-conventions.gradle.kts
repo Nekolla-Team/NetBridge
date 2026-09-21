@@ -1,7 +1,7 @@
 import me.champeau.jmh.JMHTask
 import me.champeau.jmh.JmhParameters
-import top.tangge233.netbridge.build.BuildNativeLibrary
-import top.tangge233.netbridge.build.NativePlatform
+import team.nekolla.netbridge.build.BuildNativeLibrary
+import team.nekolla.netbridge.build.NativePlatform
 import java.time.Instant
 
 // ---------------------------------------------------------------------------
@@ -89,9 +89,9 @@ private fun writeEnvironmentSidecar(target: File, startedAtMillis: Long) {
 }
 
 
-val REPORT_MAIN = "top.tangge233.netbridge.benchmarkreport.cli.ReportCliMain"
-val COMPARE_MAIN = "top.tangge233.netbridge.benchmarkreport.compare.CompareCliMain"
-val INDEX_MAIN = "top.tangge233.netbridge.benchmarkreport.index.IndexCliMain"
+val REPORT_MAIN = "team.nekolla.netbridge.benchmarkreport.cli.ReportCliMain"
+val COMPARE_MAIN = "team.nekolla.netbridge.benchmarkreport.compare.CompareCliMain"
+val INDEX_MAIN = "team.nekolla.netbridge.benchmarkreport.index.IndexCliMain"
 
 plugins {
     id("netbridge.kotlin-tooling-conventions")
@@ -497,7 +497,7 @@ fun registerTransportTask(
         this.description = description
         addBenchmarkLauncher()
         nativePathArgWhenNeeded()
-        mainClass.set("top.tangge233.netbridge.benchmark.transport.TransportBenchmarkMain")
+        mainClass.set("team.nekolla.netbridge.benchmark.transport.TransportBenchmarkMain")
         val reportDir = reportDirFor(name).get().asFile.absolutePath
         jvmArgs("-Dnetbridge.benchmark.task=$name", "-Dnetbridge.benchmark.report.dir=$reportDir")
         if (mode != "server") {
@@ -567,7 +567,7 @@ tasks.register<JavaExec>("channelIntegration") {
         if (manifest.exists()) manifest.delete()
     }
     dependsOn(buildRuntimeNative)
-    mainClass.set("top.tangge233.netbridge.benchmark.channel.NativeChannelIntegrationBenchmarkMain")
+    mainClass.set("team.nekolla.netbridge.benchmark.channel.NativeChannelIntegrationBenchmarkMain")
     argumentProviders.add {
         buildList {
             benchmarkTransportProp.orNull?.let { add("--transport"); add(it) }
@@ -602,7 +602,7 @@ tasks.register<JavaExec>("minecraftTraffic") {
             .get().asFile
         if (manifest.exists()) manifest.delete()
     }
-    mainClass.set("top.tangge233.netbridge.benchmark.workload.MinecraftTrafficMain")
+    mainClass.set("team.nekolla.netbridge.benchmark.workload.MinecraftTrafficMain")
     argumentProviders.add {
         buildList {
             benchmarkTransportProp.orNull?.let { add("--transport"); add(it) }

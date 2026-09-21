@@ -1,4 +1,4 @@
-import top.tangge233.netbridge.build.NativePlatform
+import team.nekolla.netbridge.build.NativePlatform
 
 plugins {
     id("netbridge.java-conventions")
